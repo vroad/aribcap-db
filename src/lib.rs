@@ -1,11 +1,5 @@
-pub fn run() {}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn run_returns_unit() {
-        assert_eq!(run(), ());
-    }
-}
+pub mod cli;
+pub mod config;
+pub mod render;
+pub mod stream;
+pub mod tail;
