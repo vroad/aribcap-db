@@ -1,0 +1,3 @@
+# We use direnv to load the Nix flake's dev shell when entering the directory.
+# See the nix-direnv documentation for more info: https://github.com/nix-community/nix-direnv
+use flake

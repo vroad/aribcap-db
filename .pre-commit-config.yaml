@@ -1,0 +1,25 @@
+repos:
+  - repo: local
+    hooks:
+      - id: cargo-fmt
+        name: cargo fmt
+        description: Format Rust code with rustfmt.
+        entry: cargo fmt --all
+        language: system
+        pass_filenames: false
+        files: \.rs$
+      - id: nixpkgs-fmt
+        name: nixpkgs-fmt
+        description: Format nix code with nixpkgs-fmt.
+        entry: nixpkgs-fmt
+        language: system
+        files: \.nix$
+  - repo: local
+    hooks:
+      - id: megalinter-incremental
+        name: Run MegaLinter (skipping linters that run in project mode)
+        entry: env MEGALINTER_PRE_COMMIT=1 ./scripts/mega-linter.sh
+        language: system
+        require_serial: true
+        stages:
+          - pre-commit

@@ -1,0 +1,2 @@
+[codespell]
+skip = target,Cargo.lock,flake.lock,megalinter-reports

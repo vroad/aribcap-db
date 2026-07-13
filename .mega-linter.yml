@@ -1,0 +1,44 @@
+# Configuration file for MegaLinter
+#
+# See all available variables at https://megalinter.io/latest/config-file/ and in
+# linters documentation.
+---
+APPLY_FIXES: all
+ENABLE_LINTERS:
+  # Rust
+  - RUST_CLIPPY
+  # Shell scripts
+  - BASH_EXEC
+  - BASH_SHELLCHECK
+  - BASH_SHFMT
+  # YAML config files
+  - YAML_PRETTIER
+  - YAML_YAMLLINT
+  - YAML_V8R
+  # Markdown files
+  - MARKDOWN_RUMDL
+  # .editorconfig enforcement
+  - EDITORCONFIG_EDITORCONFIG_CHECKER
+  # Secret scanning
+  - REPOSITORY_GITLEAKS
+  - REPOSITORY_SECRETLINT
+  - REPOSITORY_TRUFFLEHOG
+  # Repository hygiene
+  - REPOSITORY_GIT_DIFF
+  # Dependency/vulnerability scanning and SAST
+  - REPOSITORY_OSV_SCANNER
+  - REPOSITORY_GRYPE
+  - REPOSITORY_TRIVY
+  - REPOSITORY_SEMGREP
+  # Typo checking
+  - SPELL_CODESPELL
+REPOSITORY_SEMGREP_RULESETS:
+  - p/rust
+  - p/security-audit
+  - p/secrets
+MARKDOWN_DEFAULT_STYLE: rumdl
+SHOW_ELAPSED_TIME: true
+ADDITIONAL_EXCLUDED_DIRECTORIES:
+  - .cache
+  - .direnv
+  - target

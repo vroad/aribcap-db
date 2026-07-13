@@ -1,0 +1,13 @@
+services:
+  megalinter:
+    image: ghcr.io/oxsecurity/megalinter-rust:v9.5.0@sha256:2b13317b9b76f172643ffb507751ed5b9d341d92abbe96c4dd0c26f601807caf
+    # Every variable below can be overridden from the host environment except
+    # DEFAULT_WORKSPACE, which must match the volume mount path below.
+    environment:
+      - APPLY_FIXES
+      - ENABLE_LINTERS
+      - LOG_LEVEL
+      - CLEAR_REPORT_FOLDER=${CLEAR_REPORT_FOLDER:-true}
+      - DEFAULT_WORKSPACE=/tmp/lint
+    volumes:
+      - .:/tmp/lint
