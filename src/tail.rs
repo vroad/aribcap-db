@@ -20,6 +20,7 @@ const LINE_CHANNEL_CAPACITY: usize = 256;
 
 #[derive(Debug)]
 pub struct StreamLine {
+    pub stream_name: String,
     pub label: String,
     pub line: String,
 }
@@ -62,6 +63,43 @@ where
         let consumer = tokio::spawn(consume_lines(rx, on_line.clone()));
         tasks.push(producer);
         tasks.push(consumer);
+    }
+
+    drive_tasks(&mut tasks, shutdown).await
+}
+
+/// Tails each target under an independent supervisor. If a target's line
+/// handler fails, its supervisor waits for the normal reconnect delay and
+/// restarts only that target.
+pub async fn tail_targets_isolated<
+    OnConnect,
+    OnConnectFuture,
+    OnLine,
+    OnLineFuture,
+    ShutdownFuture,
+>(
+    targets: Vec<ResolvedStream>,
+    on_connect: OnConnect,
+    on_line: OnLine,
+    shutdown: ShutdownFuture,
+) -> Result<()>
+where
+    OnConnect: Fn(String) -> OnConnectFuture + Clone + Send + 'static,
+    OnConnectFuture: Future<Output = Result<()>> + Send + 'static,
+    OnLine: Fn(StreamLine) -> OnLineFuture + Clone + Send + 'static,
+    OnLineFuture: Future<Output = Result<()>> + Send + 'static,
+    ShutdownFuture: Future<Output = Result<()>> + Send,
+{
+    let client = reqwest::Client::new();
+    let mut tasks = FuturesUnordered::new();
+
+    for target in targets {
+        tasks.push(tokio::spawn(supervise_target(
+            client.clone(),
+            target,
+            on_connect.clone(),
+            on_line.clone(),
+        )));
     }
 
     drive_tasks(&mut tasks, shutdown).await
@@ -122,11 +160,85 @@ where
     Ok(())
 }
 
+async fn supervise_target<OnConnect, OnConnectFuture, OnLine, OnLineFuture>(
+    client: reqwest::Client,
+    target: ResolvedStream,
+    on_connect: OnConnect,
+    on_line: OnLine,
+) -> Result<()>
+where
+    OnConnect: Fn(String) -> OnConnectFuture + Clone + Send + 'static,
+    OnConnectFuture: Future<Output = Result<()>> + Send + 'static,
+    OnLine: Fn(StreamLine) -> OnLineFuture + Clone + Send + 'static,
+    OnLineFuture: Future<Output = Result<()>> + Send + 'static,
+{
+    loop {
+        let result = run_target_attempt(
+            client.clone(),
+            target.clone(),
+            on_connect.clone(),
+            on_line.clone(),
+        )
+        .await;
+
+        match result {
+            Ok(()) => tracing::error!(
+                stream = target.name,
+                retry_in = ?RECONNECT_DELAY,
+                "Stream processing stopped unexpectedly",
+            ),
+            Err(error) => tracing::error!(
+                stream = target.name,
+                error = ?error,
+                retry_in = ?RECONNECT_DELAY,
+                "Stream processing failed",
+            ),
+        }
+        tokio::time::sleep(RECONNECT_DELAY).await;
+    }
+}
+
+async fn run_target_attempt<OnConnect, OnConnectFuture, OnLine, OnLineFuture>(
+    client: reqwest::Client,
+    target: ResolvedStream,
+    on_connect: OnConnect,
+    on_line: OnLine,
+) -> Result<()>
+where
+    OnConnect: Fn(String) -> OnConnectFuture + Clone + Send + 'static,
+    OnConnectFuture: Future<Output = Result<()>> + Send + 'static,
+    OnLine: Fn(StreamLine) -> OnLineFuture + Send + 'static,
+    OnLineFuture: Future<Output = Result<()>> + Send + 'static,
+{
+    let (tx, rx) = mpsc::channel::<StreamLine>(LINE_CHANNEL_CAPACITY);
+    let producer = tail_target_with_connect(client, target, tx, on_connect);
+    let consumer = consume_lines(rx, on_line);
+    tokio::pin!(producer, consumer);
+
+    tokio::select! {
+        result = &mut producer => result.context("stream producer stopped"),
+        result = &mut consumer => result.context("stream consumer stopped"),
+    }
+}
+
 async fn tail_target(
     client: reqwest::Client,
     target: ResolvedStream,
     tx: mpsc::Sender<StreamLine>,
 ) -> Result<()> {
+    tail_target_with_connect(client, target, tx, |_| async { Ok(()) }).await
+}
+
+async fn tail_target_with_connect<OnConnect, OnConnectFuture>(
+    client: reqwest::Client,
+    target: ResolvedStream,
+    tx: mpsc::Sender<StreamLine>,
+    on_connect: OnConnect,
+) -> Result<()>
+where
+    OnConnect: Fn(String) -> OnConnectFuture + Clone,
+    OnConnectFuture: Future<Output = Result<()>>,
+{
     let stream_name = target.name;
     let label = target.label;
     let url = target.url;
@@ -140,18 +252,30 @@ async fn tail_target(
             tracing::info!(stream = stream_name, label, url, "Connecting to stream");
             stream::tail_once(&client, &url, |line| {
                 let tx = tx.clone();
+                let stream_name = stream_name.clone();
                 let label = label.clone();
                 async move {
-                    tx.send(StreamLine { label, line })
-                        .await
-                        .map_err(|_| anyhow::anyhow!("output channel closed"))
+                    tx.send(StreamLine {
+                        stream_name,
+                        label,
+                        line,
+                    })
+                    .await
+                    .map_err(|_| anyhow::anyhow!("output channel closed"))
                 }
             })
             .await
         }
     };
 
-    pump_stream(&stream_name, connect, &tx, || {
+    let connect_stream_name = stream_name.clone();
+    let before_connect = move || {
+        let on_connect = on_connect.clone();
+        let stream_name = connect_stream_name.clone();
+        async move { on_connect(stream_name).await }
+    };
+
+    pump_stream(&stream_name, before_connect, connect, &tx, || {
         tokio::time::sleep(RECONNECT_DELAY)
     })
     .await
@@ -160,13 +284,23 @@ async fn tail_target(
 /// Reconnects after stream failures until the consumer closes.
 /// Retries use a fixed delay without a cap or backoff.
 /// Injected connection and sleep functions keep retry behavior testable.
-async fn pump_stream<Connect, ConnectFuture, Sleep, SleepFuture>(
+async fn pump_stream<
+    BeforeConnect,
+    BeforeConnectFuture,
+    Connect,
+    ConnectFuture,
+    Sleep,
+    SleepFuture,
+>(
     stream_name: &str,
+    mut before_connect: BeforeConnect,
     mut connect: Connect,
     tx: &mpsc::Sender<StreamLine>,
     mut sleep: Sleep,
 ) -> Result<()>
 where
+    BeforeConnect: FnMut() -> BeforeConnectFuture,
+    BeforeConnectFuture: Future<Output = Result<()>>,
     Connect: FnMut() -> ConnectFuture,
     ConnectFuture: Future<Output = Result<()>>,
     Sleep: FnMut() -> SleepFuture,
@@ -177,6 +311,7 @@ where
         if tx.is_closed() {
             return Ok(());
         }
+        before_connect().await?;
         match connect().await {
             // The consumer may close while `connect` is running, causing a send to `tx`
             // to fail. Re-check `tx.is_closed()` before deciding to reconnect.
@@ -227,6 +362,7 @@ mod tests {
 
     fn line(label: &str, text: &str) -> StreamLine {
         StreamLine {
+            stream_name: label.to_owned(),
             label: label.to_owned(),
             line: text.to_owned(),
         }
@@ -342,12 +478,66 @@ vars.channel = "nhk"
     }
 
     #[tokio::test]
+    async fn isolated_target_error_does_not_stop_other_targets() {
+        let a_started = Arc::new(Notify::new());
+        let b_started = Arc::new(Notify::new());
+        let before_connect = {
+            let a_started = a_started.clone();
+            let b_started = b_started.clone();
+            move |stream_name: String| {
+                let a_started = a_started.clone();
+                let b_started = b_started.clone();
+                async move {
+                    if stream_name == "a" {
+                        a_started.notify_one();
+                        Err(anyhow::anyhow!("archive failed"))
+                    } else {
+                        b_started.notify_one();
+                        Ok(())
+                    }
+                }
+            }
+        };
+        let targets = ["a", "b"]
+            .into_iter()
+            .map(|name| ResolvedStream {
+                name: name.to_owned(),
+                label: name.to_owned(),
+                url: "http://127.0.0.1:1".to_owned(),
+            })
+            .collect();
+        let (shutdown_tx, shutdown_rx) = tokio::sync::oneshot::channel::<()>();
+        let task = tokio::spawn(tail_targets_isolated(
+            targets,
+            before_connect,
+            |_| async { Ok(()) },
+            async move {
+                shutdown_rx.await.context("shutdown sender dropped")?;
+                Ok(())
+            },
+        ));
+
+        wait_for(&a_started).await;
+        wait_for(&b_started).await;
+        tokio::task::yield_now().await;
+        assert!(!task.is_finished());
+
+        shutdown_tx.send(()).unwrap();
+        task.await.unwrap().unwrap();
+    }
+
+    #[tokio::test]
     async fn pump_stream_retries_until_consumer_closes() {
         let (tx, rx) = mpsc::channel::<StreamLine>(LINE_CHANNEL_CAPACITY);
         let rx = Cell::new(Some(rx));
         let attempts = Cell::new(0usize);
+        let before_connect_calls = Cell::new(0usize);
         let sleep_calls = Cell::new(0usize);
 
+        let before_connect = || {
+            before_connect_calls.set(before_connect_calls.get() + 1);
+            std::future::ready(Ok(()))
+        };
         let connect = || {
             attempts.set(attempts.get() + 1);
             std::future::ready(Err(anyhow::anyhow!("connect failed")))
@@ -362,8 +552,11 @@ vars.channel = "nhk"
             std::future::ready(())
         };
 
-        pump_stream("test", connect, &tx, sleep).await.unwrap();
+        pump_stream("test", before_connect, connect, &tx, sleep)
+            .await
+            .unwrap();
         assert_eq!(attempts.get(), 2);
+        assert_eq!(before_connect_calls.get(), 2);
         assert_eq!(sleep_calls.get(), 2);
     }
 
@@ -372,8 +565,13 @@ vars.channel = "nhk"
         let (tx, rx) = mpsc::channel::<StreamLine>(LINE_CHANNEL_CAPACITY);
         drop(rx);
         let attempts = Cell::new(0usize);
+        let before_connect_calls = Cell::new(0usize);
         let sleep_calls = Cell::new(0usize);
 
+        let before_connect = || {
+            before_connect_calls.set(before_connect_calls.get() + 1);
+            std::future::ready(Ok(()))
+        };
         let connect = || {
             attempts.set(attempts.get() + 1);
             std::future::ready(Err(anyhow::anyhow!("connect failed")))
@@ -383,7 +581,34 @@ vars.channel = "nhk"
             std::future::ready(())
         };
 
-        pump_stream("test", connect, &tx, sleep).await.unwrap();
+        pump_stream("test", before_connect, connect, &tx, sleep)
+            .await
+            .unwrap();
+        assert_eq!(attempts.get(), 0);
+        assert_eq!(before_connect_calls.get(), 0);
+        assert_eq!(sleep_calls.get(), 0);
+    }
+
+    #[tokio::test]
+    async fn pump_stream_stops_when_before_connect_fails() {
+        let (tx, _rx) = mpsc::channel::<StreamLine>(LINE_CHANNEL_CAPACITY);
+        let attempts = Cell::new(0usize);
+        let sleep_calls = Cell::new(0usize);
+        let before_connect = || std::future::ready(Err(anyhow::anyhow!("reset failed")));
+        let connect = || {
+            attempts.set(attempts.get() + 1);
+            std::future::ready(Err(anyhow::anyhow!("connect failed")))
+        };
+        let sleep = || {
+            sleep_calls.set(sleep_calls.get() + 1);
+            std::future::ready(())
+        };
+
+        let error = pump_stream("test", before_connect, connect, &tx, sleep)
+            .await
+            .unwrap_err();
+
+        assert_eq!(error.to_string(), "reset failed");
         assert_eq!(attempts.get(), 0);
         assert_eq!(sleep_calls.get(), 0);
     }

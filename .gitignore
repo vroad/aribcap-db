@@ -22,3 +22,7 @@ megalinter-reports/
 
 # rumdl
 .rumdl_cache/
+
+# aribcap-db archive data and local configuration
+aribcap-db-data/
+config.toml

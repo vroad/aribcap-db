@@ -10,11 +10,12 @@ use tracing_subscriber::EnvFilter;
 use aribcap_db::{
     cli::{Args, ColorOption, OutputFormat},
     config::Config,
-    render, tail,
+    logging, render, tail,
 };
 
 fn main() -> Result<()> {
-    init_tracing()?;
+    let filter = EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new("warn"));
+    logging::init_tracing(filter)?;
 
     let args = Args::parse();
     let config = Config::load(&args.config)?;
@@ -95,17 +96,4 @@ fn main() -> Result<()> {
     }
 
     result
-}
-
-/// Initializes the global tracing subscriber for this CLI.
-///
-/// Uses `RUST_LOG` when valid, otherwise defaults to `warn`. Tracing output is
-/// written to stderr, keeping it separate from streamed stdout data.
-fn init_tracing() -> Result<()> {
-    let filter = EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new("warn"));
-    tracing_subscriber::fmt()
-        .with_env_filter(filter)
-        .with_writer(std::io::stderr)
-        .try_init()
-        .map_err(|error| anyhow!("failed to initialize tracing subscriber: {error}"))
 }

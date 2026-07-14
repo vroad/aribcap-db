@@ -1,0 +1,13 @@
+url_template = "http://localhost:40772/api/timeshift/{{ channel }}/tuner-stream?post-filters[]=aribcap-dump"
+
+[streams.nhk]
+label = "NHK"
+vars.channel = "nhk"
+
+[streams.nhke]
+label = "NHK-E"
+vars.channel = "nhke"
+
+[serve]
+data_dir = "./aribcap-db-data"
+retention = "30d"

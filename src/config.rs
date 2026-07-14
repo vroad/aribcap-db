@@ -1,4 +1,8 @@
-use std::{collections::BTreeMap, fs, path::Path};
+use std::{
+    collections::BTreeMap,
+    fs,
+    path::{Path, PathBuf},
+};
 
 use anyhow::{Context, Result, bail};
 use serde::Deserialize;
@@ -7,6 +11,9 @@ use serde::Deserialize;
 pub struct Config {
     pub url_template: String,
     pub streams: BTreeMap<String, StreamConfig>,
+
+    #[serde(default)]
+    pub serve: Option<ServeConfig>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -15,6 +22,12 @@ pub struct StreamConfig {
 
     #[serde(default)]
     pub vars: BTreeMap<String, String>,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+pub struct ServeConfig {
+    pub data_dir: Option<PathBuf>,
+    pub retention: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
