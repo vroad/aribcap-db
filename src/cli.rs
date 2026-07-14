@@ -1,4 +1,4 @@
-use std::path::PathBuf;
+use std::{net::SocketAddr, path::PathBuf};
 
 use clap::{Parser, Subcommand, ValueEnum};
 
@@ -58,7 +58,7 @@ pub struct Args {
 }
 
 #[derive(Debug, Parser)]
-#[command(name = "aribcap-db", about = "Store aribcap JSONL records")]
+#[command(name = "aribcap-db", about = "Store and serve aribcap JSONL records")]
 pub struct DbArgs {
     #[command(subcommand)]
     pub command: DbCommand,
@@ -66,7 +66,7 @@ pub struct DbArgs {
 
 #[derive(Debug, Subcommand)]
 pub enum DbCommand {
-    #[command(about = "Store JSONL streams as per-program archive files")]
+    #[command(about = "Store JSONL streams and serve them over HTTP")]
     Serve(ServeArgs),
 }
 
@@ -77,6 +77,13 @@ pub struct ServeArgs {
 
     #[arg(long, value_name = "PATH", help = "Directory for stored JSONL records")]
     pub data_dir: Option<PathBuf>,
+
+    #[arg(
+        long,
+        value_name = "ADDR",
+        help = "HTTP listen address, for example 127.0.0.1:40773"
+    )]
+    pub listen: Option<SocketAddr>,
 
     #[arg(
         long,
@@ -104,10 +111,18 @@ mod tests {
 
     #[test]
     fn serve_accepts_config() {
-        let args =
-            DbArgs::try_parse_from(["aribcap-db", "serve", "--config", "config.toml"]).unwrap();
+        let args = DbArgs::try_parse_from([
+            "aribcap-db",
+            "serve",
+            "--config",
+            "config.toml",
+            "--listen",
+            "127.0.0.1:40800",
+        ])
+        .unwrap();
 
         let DbCommand::Serve(args) = args.command;
         assert_eq!(args.config, PathBuf::from("config.toml"));
+        assert_eq!(args.listen.unwrap().to_string(), "127.0.0.1:40800");
     }
 }

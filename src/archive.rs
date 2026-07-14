@@ -9,6 +9,7 @@ use std::{
 
 use anyhow::{Context, Result, anyhow};
 use chrono::{DateTime, FixedOffset, NaiveDateTime, TimeZone as _, Utc};
+use serde::Serialize;
 use serde_json::Value;
 
 const RECORDS_DIR: &str = "records";
@@ -57,6 +58,15 @@ pub enum ArchiveEvent {
 pub struct GarbageCollectionDryRun {
     pub eligible_files: usize,
     pub cutoff: DateTime<FixedOffset>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct RecordEntry {
+    pub stream: String,
+    pub month: String,
+    pub filename: String,
+    pub path: String,
+    pub size_bytes: u64,
 }
 
 impl ArchiveStore {
@@ -223,7 +233,7 @@ fn open_program_file(
     fs::create_dir_all(&directory)
         .with_context(|| format!("failed to create {}", directory.display()))?;
 
-    // A restarted process can record the same programme in the same second.
+    // A restarted process can record the same program in the same second.
     // Keep both captures rather than overwriting a previous archive.
     for suffix in 0_u32.. {
         let collision_suffix = if suffix == 0 {
@@ -272,6 +282,167 @@ fn truncate_utf8_bytes(input: &str, max_bytes: usize) -> String {
 
 pub fn records_root(data_dir: &Path) -> PathBuf {
     data_dir.join(RECORDS_DIR)
+}
+
+pub fn list_streams(data_dir: &Path) -> io::Result<Vec<String>> {
+    read_dir_names(&records_root(data_dir), |entry| {
+        entry.file_type().is_ok_and(|file_type| file_type.is_dir())
+    })
+}
+
+pub fn list_months(data_dir: &Path, stream: &str) -> io::Result<Vec<String>> {
+    validate_stream_component(stream)?;
+    read_dir_names(&records_root(data_dir).join(stream), |entry| {
+        entry.file_type().is_ok_and(|file_type| file_type.is_dir())
+            && is_month_component(&entry.file_name().to_string_lossy())
+    })
+}
+
+pub fn list_records(data_dir: &Path, stream: &str, month: &str) -> io::Result<Vec<RecordEntry>> {
+    validate_stream_component(stream)?;
+    validate_month_component(month)?;
+    let directory = records_root(data_dir).join(stream).join(month);
+    let entries = match fs::read_dir(&directory) {
+        Ok(entries) => entries,
+        Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(Vec::new()),
+        Err(error) => return Err(error),
+    };
+    let mut records = Vec::new();
+
+    for entry in entries {
+        let entry = match entry {
+            Ok(entry) => entry,
+            Err(error) if error.kind() == io::ErrorKind::NotFound => continue,
+            Err(error) => return Err(error),
+        };
+        if let Some(record) = record_entry(entry, stream, month)? {
+            records.push(record);
+        }
+    }
+
+    records.sort_by(|left, right| left.filename.cmp(&right.filename));
+    Ok(records)
+}
+
+fn record_entry(entry: fs::DirEntry, stream: &str, month: &str) -> io::Result<Option<RecordEntry>> {
+    let file_type = match entry.file_type() {
+        Ok(file_type) => file_type,
+        Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(None),
+        Err(error) => return Err(error),
+    };
+    if !file_type.is_file() {
+        return Ok(None);
+    }
+
+    let filename = entry.file_name().to_string_lossy().into_owned();
+    if !filename.ends_with(".jsonl") {
+        return Ok(None);
+    }
+
+    let metadata = match entry.metadata() {
+        Ok(metadata) => metadata,
+        Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(None),
+        Err(error) => return Err(error),
+    };
+    Ok(Some(RecordEntry {
+        stream: stream.to_owned(),
+        month: month.to_owned(),
+        path: format!(
+            "/api/records/{}/{}/{}",
+            urlencoding::encode(stream),
+            urlencoding::encode(month),
+            urlencoding::encode(&filename)
+        ),
+        filename,
+        size_bytes: metadata.len(),
+    }))
+}
+
+pub fn resolve_record_path(
+    data_dir: &Path,
+    stream: &str,
+    month: &str,
+    filename: &str,
+) -> io::Result<Option<PathBuf>> {
+    validate_stream_component(stream)?;
+    validate_month_component(month)?;
+    validate_filename_component(filename)?;
+
+    if !filename.ends_with(".jsonl") {
+        return Ok(None);
+    }
+
+    let path = records_root(data_dir)
+        .join(stream)
+        .join(month)
+        .join(filename);
+    match fs::symlink_metadata(&path) {
+        Ok(metadata) if metadata.is_file() => Ok(Some(path)),
+        Ok(_) => Ok(None),
+        Err(error) if error.kind() == io::ErrorKind::NotFound => Ok(None),
+        Err(error) => Err(error),
+    }
+}
+
+fn read_dir_names(
+    path: &Path,
+    mut include: impl FnMut(&fs::DirEntry) -> bool,
+) -> io::Result<Vec<String>> {
+    let entries = match fs::read_dir(path) {
+        Ok(entries) => entries,
+        Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(Vec::new()),
+        Err(error) => return Err(error),
+    };
+    let mut names = Vec::new();
+    for entry in entries {
+        let entry = entry?;
+        if include(&entry) {
+            names.push(entry.file_name().to_string_lossy().into_owned());
+        }
+    }
+    names.sort();
+    Ok(names)
+}
+
+fn validate_stream_component(stream: &str) -> io::Result<()> {
+    validate_path_component(stream, "stream")
+}
+
+fn validate_filename_component(filename: &str) -> io::Result<()> {
+    validate_path_component(filename, "filename")
+}
+
+fn validate_path_component(component: &str, name: &str) -> io::Result<()> {
+    if component.is_empty()
+        || component == "."
+        || component == ".."
+        || component.contains('/')
+        || component.contains('\\')
+        || component != sanitize_filename::sanitize(component)
+    {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidInput,
+            format!("invalid {name} path component"),
+        ));
+    }
+    Ok(())
+}
+
+fn validate_month_component(month: &str) -> io::Result<()> {
+    if !is_month_component(month) {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidInput,
+            "invalid month path component",
+        ));
+    }
+    Ok(())
+}
+
+fn is_month_component(month: &str) -> bool {
+    month.len() == 7
+        && month.as_bytes()[4] == b'-'
+        && month[..4].bytes().all(|byte| byte.is_ascii_digit())
+        && month[5..].bytes().all(|byte| byte.is_ascii_digit())
 }
 
 /// Checks that `retention` can be represented as an archive cutoff date.
@@ -491,5 +662,99 @@ mod tests {
             format!("{eit}\n{{\"type\":\"caption\",\"text\":\"after\"}}\n")
         );
         fs::remove_dir_all(data_dir).unwrap();
+    }
+
+    #[test]
+    fn lists_and_resolves_archive_records() {
+        let data_dir =
+            std::env::temp_dir().join(format!("aribcap-archive-list-test-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&data_dir);
+        let directory = records_root(&data_dir).join("nhk").join("2026-07");
+        fs::create_dir_all(&directory).unwrap();
+        let filename = "2026-07-14_12-00-00.news#weather.jsonl";
+        fs::write(directory.join(filename), "{}\n").unwrap();
+        fs::write(directory.join("ignored.txt"), "ignored").unwrap();
+
+        assert_eq!(list_streams(&data_dir).unwrap(), ["nhk"]);
+        assert_eq!(list_months(&data_dir, "nhk").unwrap(), ["2026-07"]);
+        let records = list_records(&data_dir, "nhk", "2026-07").unwrap();
+        assert_eq!(records.len(), 1);
+        assert_eq!(records[0].filename, filename);
+        assert_eq!(records[0].size_bytes, 3);
+        assert_eq!(
+            records[0].path,
+            "/api/records/nhk/2026-07/2026-07-14_12-00-00.news%23weather.jsonl"
+        );
+        assert_eq!(
+            resolve_record_path(&data_dir, "nhk", "2026-07", filename).unwrap(),
+            Some(directory.join(filename))
+        );
+        assert_eq!(
+            resolve_record_path(&data_dir, "nhk", "2026-07", "missing.jsonl").unwrap(),
+            None
+        );
+        assert_eq!(
+            resolve_record_path(&data_dir, "nhk", "2026-07", "ignored.txt").unwrap(),
+            None
+        );
+
+        let directory_entry = directory.join("directory.jsonl");
+        fs::create_dir(&directory_entry).unwrap();
+        assert_eq!(
+            resolve_record_path(&data_dir, "nhk", "2026-07", "directory.jsonl").unwrap(),
+            None
+        );
+
+        #[cfg(unix)]
+        {
+            let symlink_entry = directory.join("symlink.jsonl");
+            std::os::unix::fs::symlink(filename, &symlink_entry).unwrap();
+            assert_eq!(
+                resolve_record_path(&data_dir, "nhk", "2026-07", "symlink.jsonl").unwrap(),
+                None
+            );
+        }
+
+        fs::remove_dir_all(data_dir).unwrap();
+    }
+
+    #[test]
+    fn record_listing_skips_entry_removed_after_read_dir() {
+        let data_dir = std::env::temp_dir().join(format!(
+            "aribcap-archive-removed-list-entry-test-{}",
+            std::process::id()
+        ));
+        let _ = fs::remove_dir_all(&data_dir);
+        let directory = records_root(&data_dir).join("nhk").join("2026-07");
+        fs::create_dir_all(&directory).unwrap();
+        let path = directory.join("2026-07-14_12-00-00.news.jsonl");
+        fs::write(&path, "{}\n").unwrap();
+
+        let entry = fs::read_dir(&directory).unwrap().next().unwrap().unwrap();
+        fs::remove_file(path).unwrap();
+
+        assert_eq!(record_entry(entry, "nhk", "2026-07").unwrap(), None);
+
+        fs::remove_dir_all(data_dir).unwrap();
+    }
+
+    #[test]
+    fn archive_listing_rejects_invalid_path_components() {
+        let data_dir = std::env::temp_dir();
+
+        assert_eq!(
+            list_months(&data_dir, "..").unwrap_err().kind(),
+            io::ErrorKind::InvalidInput
+        );
+        assert_eq!(
+            list_records(&data_dir, "nhk", "2026-7").unwrap_err().kind(),
+            io::ErrorKind::InvalidInput
+        );
+        assert_eq!(
+            resolve_record_path(&data_dir, "nhk", "2026-07", "../record.jsonl")
+                .unwrap_err()
+                .kind(),
+            io::ErrorKind::InvalidInput
+        );
     }
 }

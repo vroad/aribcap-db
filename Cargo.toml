@@ -18,6 +18,7 @@ path = "src/bin/aribcap-db.rs"
 anyhow = "1.0"
 anstream = "1.0"
 anstyle = "1.0"
+axum = "0.8"
 chrono = "0.4"
 clap = { version = "4.6", features = ["derive"] }
 colored_json = "5.0"
@@ -28,9 +29,15 @@ sanitize-filename = "0.6"
 serde = { version = "1.0", features = ["derive"] }
 serde_json = { version = "1.0", features = ["preserve_order"] }
 terminal_size = "0.4"
-tokio = { version = "1.0", features = ["macros", "rt-multi-thread", "signal", "sync", "time"] }
+tokio = { version = "1.0", features = ["fs", "io-util", "macros", "net", "rt-multi-thread", "signal", "sync", "time"] }
+tokio-util = { version = "0.7", features = ["io"] }
 toml = "1.0"
+tower-http = { version = "0.7", features = ["trace"] }
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter", "fmt"] }
 unicode-width = "0.2"
 upon = { version = "0.10", default-features = false, features = ["serde"] }
+urlencoding = "2.1"
+
+[dev-dependencies]
+tower = { version = "0.5", features = ["util"] }

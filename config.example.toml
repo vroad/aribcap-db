@@ -10,4 +10,5 @@ vars.channel = "nhke"
 
 [serve]
 data_dir = "./aribcap-db-data"
+listen = "127.0.0.1:40773"
 retention = "30d"

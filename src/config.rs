@@ -27,6 +27,7 @@ pub struct StreamConfig {
 #[derive(Debug, Clone, Deserialize)]
 pub struct ServeConfig {
     pub data_dir: Option<PathBuf>,
+    pub listen: Option<String>,
     pub retention: Option<String>,
 }
 
@@ -56,6 +57,17 @@ impl Config {
     }
 
     fn resolve_stream_config(&self, target: &str, stream: &StreamConfig) -> Result<ResolvedStream> {
+        if target.is_empty() {
+            bail!("stream name must not be empty");
+        }
+
+        let sanitized_target = sanitize_filename::sanitize(target);
+        if sanitized_target != target {
+            bail!(
+                "stream name '{target}' is not usable as an archive path component (sanitized form: '{sanitized_target}')"
+            );
+        }
+
         let label = stream.label.as_deref().unwrap_or(target).to_owned();
         let url = render_url_template(&self.url_template, &stream.vars)
             .with_context(|| format!("failed to resolve stream '{target}'"))?;
@@ -182,5 +194,42 @@ vars.channel = "nhk"
                 .collect::<Vec<_>>(),
             vec!["nhk", "nhk_e"]
         );
+    }
+
+    #[test]
+    fn rejects_stream_names_changed_by_sanitization() {
+        let config: Config = toml::from_str(
+            r#"
+url_template = "http://example.test/{{ channel }}"
+
+[streams."bs:1"]
+vars.channel = "bs1"
+"#,
+        )
+        .unwrap();
+
+        let error = config.resolve_all_streams().unwrap_err();
+
+        assert_eq!(
+            error.to_string(),
+            "stream name 'bs:1' is not usable as an archive path component (sanitized form: 'bs1')"
+        );
+    }
+
+    #[test]
+    fn rejects_empty_stream_name() {
+        let config: Config = toml::from_str(
+            r#"
+url_template = "http://example.test/{{ channel }}"
+
+[streams.""]
+vars.channel = "empty"
+"#,
+        )
+        .unwrap();
+
+        let error = config.resolve_all_streams().unwrap_err();
+
+        assert_eq!(error.to_string(), "stream name must not be empty");
     }
 }
