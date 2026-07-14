@@ -464,12 +464,16 @@ pub fn dry_run_garbage_collection(
 }
 
 /// Deletes completed archive files whose recording-start timestamp is older
-/// than `retention`. The active file for each stream is never removed.
+/// than `retention`. The active file for each stream is never removed. Empty
+/// month directories are removed, while stream directories are retained.
 pub fn collect_garbage(store: &Arc<Mutex<ArchiveStore>>, retention: Duration) -> Result<usize> {
     let cutoff = retention_cutoff(jst_now(), retention)?;
-    visit_expired_files(store, cutoff, |path| {
+    let data_dir = lock_store(store)?.data_dir.clone();
+    let files_removed = visit_expired_files(store, cutoff, |path| {
         fs::remove_file(path).with_context(|| format!("failed to remove {}", path.display()))
-    })
+    })?;
+    remove_empty_month_directories(&data_dir)?;
+    Ok(files_removed)
 }
 
 fn retention_cutoff(
@@ -526,6 +530,42 @@ fn visit_expired_files(
         }
     }
     Ok(eligible)
+}
+
+fn remove_empty_month_directories(data_dir: &Path) -> Result<()> {
+    let root = records_root(data_dir);
+    let Ok(streams) = fs::read_dir(&root) else {
+        return Ok(());
+    };
+
+    for stream in streams {
+        let stream = stream?;
+        if !stream.file_type()?.is_dir() {
+            continue;
+        }
+        for month in fs::read_dir(stream.path())? {
+            let month = month?;
+            if !month.file_type()?.is_dir()
+                || !is_month_component(&month.file_name().to_string_lossy())
+            {
+                continue;
+            }
+            let path = month.path();
+            match fs::remove_dir(&path) {
+                Ok(()) => {}
+                Err(error)
+                    if matches!(
+                        error.kind(),
+                        io::ErrorKind::NotFound | io::ErrorKind::DirectoryNotEmpty
+                    ) => {}
+                Err(error) => {
+                    return Err(error)
+                        .with_context(|| format!("failed to remove {}", path.display()));
+                }
+            }
+        }
+    }
+    Ok(())
 }
 
 fn is_expired(path: &Path, cutoff: DateTime<FixedOffset>) -> bool {
@@ -606,6 +646,33 @@ mod tests {
 
         assert_eq!(collect_garbage(&store, retention).unwrap(), 1);
         assert!(!path.exists());
+        fs::remove_dir_all(data_dir).unwrap();
+    }
+
+    #[test]
+    fn garbage_collection_removes_empty_month_but_keeps_stream_directory() {
+        let data_dir = std::env::temp_dir().join(format!(
+            "aribcap-archive-gc-empty-month-test-{}",
+            std::process::id()
+        ));
+        let _ = fs::remove_dir_all(&data_dir);
+        let stream_directory = records_root(&data_dir).join("nhk");
+        let month_directory = stream_directory.join("2000-01");
+        fs::create_dir_all(&month_directory).unwrap();
+        fs::write(
+            month_directory.join("2000-01-01_00-00-00.news.jsonl"),
+            "{}\n",
+        )
+        .unwrap();
+        let store = Arc::new(Mutex::new(ArchiveStore::new(&data_dir)));
+
+        assert_eq!(
+            collect_garbage(&store, Duration::from_secs(24 * 60 * 60)).unwrap(),
+            1
+        );
+        assert!(!month_directory.exists());
+        assert!(stream_directory.is_dir());
+
         fs::remove_dir_all(data_dir).unwrap();
     }
 
