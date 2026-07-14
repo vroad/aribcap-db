@@ -1,0 +1,26 @@
+{
+  "db_name": "SQLite",
+  "query": "\n        SELECT path AS \"path!\" FROM programs\n        UNION\n        SELECT path AS \"path!\" FROM indexed_files\n        ",
+  "describe": {
+    "columns": [
+      {
+        "name": "path!",
+        "ordinal": 0,
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "programs",
+            "name": "path"
+          }
+        }
+      }
+    ],
+    "parameters": {
+      "Right": 0
+    },
+    "nullable": [
+      true
+    ]
+  },
+  "hash": "4e03fb9d19f8061f011c6f16d98f7376720591d990c6eb54ff01a4f21a783dea"
+}

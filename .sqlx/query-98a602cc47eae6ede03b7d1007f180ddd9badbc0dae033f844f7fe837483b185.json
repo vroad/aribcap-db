@@ -1,0 +1,62 @@
+{
+  "db_name": "SQLite",
+  "query": "\n        SELECT program_id, indexed_offset, indexed_lines, status\n        FROM indexed_files\n        WHERE path = ?1\n        ",
+  "describe": {
+    "columns": [
+      {
+        "name": "program_id",
+        "ordinal": 0,
+        "type_info": "Integer",
+        "origin": {
+          "Table": {
+            "table": "indexed_files",
+            "name": "program_id"
+          }
+        }
+      },
+      {
+        "name": "indexed_offset",
+        "ordinal": 1,
+        "type_info": "Integer",
+        "origin": {
+          "Table": {
+            "table": "indexed_files",
+            "name": "indexed_offset"
+          }
+        }
+      },
+      {
+        "name": "indexed_lines",
+        "ordinal": 2,
+        "type_info": "Integer",
+        "origin": {
+          "Table": {
+            "table": "indexed_files",
+            "name": "indexed_lines"
+          }
+        }
+      },
+      {
+        "name": "status",
+        "ordinal": 3,
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "indexed_files",
+            "name": "status"
+          }
+        }
+      }
+    ],
+    "parameters": {
+      "Right": 1
+    },
+    "nullable": [
+      true,
+      false,
+      false,
+      false
+    ]
+  },
+  "hash": "98a602cc47eae6ede03b7d1007f180ddd9badbc0dae033f844f7fe837483b185"
+}

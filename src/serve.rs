@@ -2,7 +2,7 @@ use std::{
     future::Future,
     net::SocketAddr,
     path::PathBuf,
-    sync::{Arc, Mutex},
+    sync::{Arc, Mutex, atomic::AtomicBool},
     time::Duration,
 };
 
@@ -15,11 +15,12 @@ use crate::{
     cli::ServeArgs,
     config::{Config, ServeConfig},
     live::LiveBroadcaster,
-    logging, server, tail,
+    logging, search_db, server, tail,
 };
 
 const DEFAULT_LISTEN: &str = "127.0.0.1:40773";
 const GC_INTERVAL: Duration = Duration::from_secs(60 * 60);
+const SEARCH_INDEX_INTERVAL: Duration = Duration::from_secs(10);
 const RETRY_INTERVAL: Duration = Duration::from_secs(15);
 const HTTP_SHUTDOWN_TIMEOUT: Duration = Duration::from_secs(10);
 
@@ -87,8 +88,24 @@ pub async fn run(args: ServeArgs) -> Result<()> {
     // -------------------------------------------------------------------------
     // Run and supervise the long-lived services
     // -------------------------------------------------------------------------
-    let mut gc_task = tokio::spawn(gc_loop(store.clone(), retention, shutdown_rx.clone()));
-    let app = server::router(data_dir.clone(), live_broadcaster, shutdown_rx.clone());
+    let search_db_path = search_db::search_db_path(&data_dir);
+    let search_db_ready = Arc::new(AtomicBool::new(false));
+    let (maintenance_shutdown_tx, maintenance_shutdown_rx) = watch::channel(false);
+    let mut maintenance_task = tokio::spawn(archive_maintenance_loop(
+        search_db_path.clone(),
+        archive::records_root(&data_dir),
+        store.clone(),
+        retention,
+        search_db_ready.clone(),
+        maintenance_shutdown_rx,
+    ));
+    let app = server::router(
+        data_dir.clone(),
+        search_db_path.clone(),
+        live_broadcaster,
+        search_db_ready.clone(),
+        shutdown_rx.clone(),
+    );
     // Keep ingest and garbage collection running while HTTP is unavailable. After
     // a bind or serve error, the HTTP task waits 15 seconds and tries to bind and
     // serve again. If the HTTP task exits unexpectedly, `run()` restarts it.
@@ -99,9 +116,10 @@ pub async fn run(args: ServeArgs) -> Result<()> {
                 let _ = shutdown_tx.send(true);
                 tokio::join!(
                     join(ingest_task, "JSONL ingest"),
-                    join(gc_task, "archive garbage collection"),
                     join_http_with_timeout(http_task, HTTP_SHUTDOWN_TIMEOUT),
                 );
+                let _ = maintenance_shutdown_tx.send(true);
+                join(maintenance_task, "archive maintenance").await;
                 return signal_result;
             }
             result = &mut ingest_task => {
@@ -109,19 +127,11 @@ pub async fn run(args: ServeArgs) -> Result<()> {
                 tracing::error!(%error, "Service task stopped");
                 let _ = shutdown_tx.send(true);
                 tokio::join!(
-                    join(gc_task, "archive garbage collection"),
                     join_http_with_timeout(http_task, HTTP_SHUTDOWN_TIMEOUT),
                 );
+                let _ = maintenance_shutdown_tx.send(true);
+                join(maintenance_task, "archive maintenance").await;
                 return Err(error);
-            }
-            result = &mut gc_task => {
-                let error = unexpected_service_exit("archive garbage collection", result);
-                tracing::error!(%error, "Service task stopped; restarting");
-                gc_task = tokio::spawn(gc_loop(
-                    store.clone(),
-                    retention,
-                    shutdown_rx.clone(),
-                ));
             }
             result = &mut http_task => {
                 let error = unexpected_service_exit("HTTP server", result);
@@ -130,6 +140,18 @@ pub async fn run(args: ServeArgs) -> Result<()> {
                     listen,
                     app.clone(),
                     shutdown_rx.clone(),
+                ));
+            }
+            result = &mut maintenance_task => {
+                let error = unexpected_service_exit("archive maintenance", result);
+                tracing::error!(%error, "Service task stopped; restarting");
+                maintenance_task = tokio::spawn(archive_maintenance_loop(
+                    search_db_path.clone(),
+                    archive::records_root(&data_dir),
+                    store.clone(),
+                    retention,
+                    search_db_ready.clone(),
+                    maintenance_shutdown_tx.subscribe(),
                 ));
             }
         }
@@ -327,22 +349,50 @@ async fn retry_until_shutdown<RunOnce, Run>(
     }
 }
 
-async fn gc_loop(
+async fn archive_maintenance_loop(
+    db_path: PathBuf,
+    records_root: PathBuf,
     store: Arc<Mutex<ArchiveStore>>,
     retention: Duration,
+    search_db_ready: Arc<AtomicBool>,
     mut shutdown: watch::Receiver<bool>,
 ) {
     loop {
-        if sleep_or_shutdown(GC_INTERVAL, &mut shutdown).await {
+        let result = search_db::run_archive_maintenance(
+            db_path.clone(),
+            records_root.clone(),
+            search_db::ArchiveMaintenanceConfig {
+                index_interval: SEARCH_INDEX_INTERVAL,
+                gc_interval: GC_INTERVAL,
+                retention,
+            },
+            store.clone(),
+            search_db_ready.clone(),
+            shutdown.clone(),
+        )
+        .await;
+
+        if requested(&shutdown) {
+            if let Err(error) = result {
+                tracing::warn!(%error, "Archive maintenance shutdown processing failed");
+            }
             return;
         }
-        let result = tokio::task::block_in_place(|| archive::collect_garbage(&store, retention));
+
         match result {
-            Ok(0) => {}
-            Ok(files_removed) => {
-                tracing::info!(files_removed, "Archive garbage collection finished")
-            }
-            Err(error) => tracing::warn!(%error, "Archive garbage collection failed"),
+            Ok(()) => tracing::warn!(
+                retry_in = ?RETRY_INTERVAL,
+                "Archive maintenance stopped unexpectedly"
+            ),
+            Err(error) => tracing::warn!(
+                %error,
+                retry_in = ?RETRY_INTERVAL,
+                "Archive maintenance failed"
+            ),
+        }
+
+        if sleep_or_shutdown(RETRY_INTERVAL, &mut shutdown).await {
+            return;
         }
     }
 }

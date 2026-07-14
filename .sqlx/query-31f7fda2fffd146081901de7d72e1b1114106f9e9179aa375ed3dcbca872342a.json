@@ -1,0 +1,26 @@
+{
+  "db_name": "SQLite",
+  "query": "\n        INSERT INTO programs (\n            stream, month, filename, path, recording_started_at, start_time, duration_sec,\n            service_id, transport_stream_id, original_network_id, event_id,\n            title, description, normalized_title, normalized_description\n        ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15)\n        ON CONFLICT(path) DO UPDATE SET\n            start_time = excluded.start_time,\n            duration_sec = excluded.duration_sec,\n            service_id = excluded.service_id,\n            transport_stream_id = excluded.transport_stream_id,\n            original_network_id = excluded.original_network_id,\n            event_id = excluded.event_id,\n            title = excluded.title,\n            description = excluded.description,\n            normalized_title = excluded.normalized_title,\n            normalized_description = excluded.normalized_description\n        ON CONFLICT(stream, recording_started_at) DO UPDATE SET\n            month = excluded.month,\n            filename = excluded.filename,\n            path = excluded.path,\n            start_time = excluded.start_time,\n            duration_sec = excluded.duration_sec,\n            service_id = excluded.service_id,\n            transport_stream_id = excluded.transport_stream_id,\n            original_network_id = excluded.original_network_id,\n            event_id = excluded.event_id,\n            title = excluded.title,\n            description = excluded.description,\n            normalized_title = excluded.normalized_title,\n            normalized_description = excluded.normalized_description\n        RETURNING id\n        ",
+  "describe": {
+    "columns": [
+      {
+        "name": "id",
+        "ordinal": 0,
+        "type_info": "Integer",
+        "origin": {
+          "Table": {
+            "table": "programs",
+            "name": "id"
+          }
+        }
+      }
+    ],
+    "parameters": {
+      "Right": 15
+    },
+    "nullable": [
+      false
+    ]
+  },
+  "hash": "31f7fda2fffd146081901de7d72e1b1114106f9e9179aa375ed3dcbca872342a"
+}

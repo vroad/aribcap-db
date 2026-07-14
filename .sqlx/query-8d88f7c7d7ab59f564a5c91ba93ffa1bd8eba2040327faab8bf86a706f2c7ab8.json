@@ -1,0 +1,26 @@
+{
+  "db_name": "SQLite",
+  "query": "\n        SELECT path FROM programs\n        WHERE stream = ?1 AND recording_started_at = ?2\n        ",
+  "describe": {
+    "columns": [
+      {
+        "name": "path",
+        "ordinal": 0,
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "programs",
+            "name": "path"
+          }
+        }
+      }
+    ],
+    "parameters": {
+      "Right": 2
+    },
+    "nullable": [
+      false
+    ]
+  },
+  "hash": "8d88f7c7d7ab59f564a5c91ba93ffa1bd8eba2040327faab8bf86a706f2c7ab8"
+}

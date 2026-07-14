@@ -1,0 +1,12 @@
+{
+  "db_name": "SQLite",
+  "query": "\n        INSERT INTO indexed_files (\n            path, program_id, size_bytes, mtime, indexed_offset, indexed_lines, status, last_error\n        ) VALUES (?1, NULL, ?2, ?3, 0, 0, 'duplicate', ?4)\n        ON CONFLICT(path) DO UPDATE SET\n            program_id = NULL,\n            size_bytes = excluded.size_bytes,\n            mtime = excluded.mtime,\n            indexed_offset = 0,\n            indexed_lines = 0,\n            status = 'duplicate',\n            last_error = excluded.last_error\n        ",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Right": 4
+    },
+    "nullable": []
+  },
+  "hash": "b85bd6f32e8a46837c61cca11b3a6eadc8b8476502c1e9916e1d07abadf997f7"
+}

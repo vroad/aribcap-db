@@ -21,6 +21,7 @@
             rust-analyzer
             rustc
             rustfmt
+            sqlx-cli
           ];
         };
       });

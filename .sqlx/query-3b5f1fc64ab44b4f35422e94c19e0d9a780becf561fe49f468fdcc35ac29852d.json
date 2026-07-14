@@ -1,0 +1,26 @@
+{
+  "db_name": "SQLite",
+  "query": "\n        INSERT INTO caption_lines (\n            program_id, line_no, byte_offset, time, duration_ms, caption_type, language_code,\n            text, normalized_text\n        ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)\n        ON CONFLICT(program_id, line_no) DO UPDATE SET\n            byte_offset = excluded.byte_offset,\n            time = excluded.time,\n            duration_ms = excluded.duration_ms,\n            caption_type = excluded.caption_type,\n            language_code = excluded.language_code,\n            text = excluded.text,\n            normalized_text = excluded.normalized_text\n        RETURNING id\n        ",
+  "describe": {
+    "columns": [
+      {
+        "name": "id",
+        "ordinal": 0,
+        "type_info": "Integer",
+        "origin": {
+          "Table": {
+            "table": "caption_lines",
+            "name": "id"
+          }
+        }
+      }
+    ],
+    "parameters": {
+      "Right": 9
+    },
+    "nullable": [
+      false
+    ]
+  },
+  "hash": "3b5f1fc64ab44b4f35422e94c19e0d9a780becf561fe49f468fdcc35ac29852d"
+}

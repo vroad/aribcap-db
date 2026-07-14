@@ -1,0 +1,12 @@
+{
+  "db_name": "SQLite",
+  "query": "DELETE FROM caption_lines WHERE program_id = ?1",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Right": 1
+    },
+    "nullable": []
+  },
+  "hash": "0734c06541851e68bf66b1434e4ac10173efce66790244ea6cd4cb65d5794f7a"
+}

@@ -4,6 +4,7 @@ pub mod config;
 pub mod live;
 pub mod logging;
 pub mod render;
+pub mod search_db;
 pub mod serve;
 pub mod server;
 pub mod stream;

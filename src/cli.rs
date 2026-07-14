@@ -68,6 +68,15 @@ pub struct DbArgs {
 pub enum DbCommand {
     #[command(about = "Store JSONL streams and serve them over HTTP")]
     Serve(ServeArgs),
+
+    #[command(
+        about = "Rebuild the SQLite search index from JSONL archives",
+        long_about = "Rebuild the SQLite search index from JSONL archives.\n\n\
+            Do not run this while `aribcap-db serve` is running against the \
+            same data directory: rebuild deletes and recreates the search \
+            database file, which the running server does not expect."
+    )]
+    SearchRebuild(SearchRebuildArgs),
 }
 
 #[derive(Debug, Parser)]
@@ -101,6 +110,12 @@ pub struct ServeArgs {
     pub log_level: String,
 }
 
+#[derive(Debug, Parser)]
+pub struct SearchRebuildArgs {
+    #[arg(long, value_name = "PATH", help = "Directory for stored JSONL records")]
+    pub data_dir: PathBuf,
+}
+
 #[cfg(test)]
 mod tests {
     use std::path::PathBuf;
@@ -121,8 +136,21 @@ mod tests {
         ])
         .unwrap();
 
-        let DbCommand::Serve(args) = args.command;
+        let DbCommand::Serve(args) = args.command else {
+            panic!("expected DbCommand::Serve");
+        };
         assert_eq!(args.config, PathBuf::from("config.toml"));
         assert_eq!(args.listen.unwrap().to_string(), "127.0.0.1:40800");
+    }
+
+    #[test]
+    fn search_rebuild_accepts_data_dir() {
+        let args =
+            DbArgs::try_parse_from(["aribcap-db", "search-rebuild", "--data-dir", "data"]).unwrap();
+
+        let DbCommand::SearchRebuild(args) = args.command else {
+            panic!("expected DbCommand::SearchRebuild");
+        };
+        assert_eq!(args.data_dir, PathBuf::from("data"));
     }
 }

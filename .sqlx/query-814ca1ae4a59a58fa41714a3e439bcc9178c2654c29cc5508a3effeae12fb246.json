@@ -1,0 +1,12 @@
+{
+  "db_name": "SQLite",
+  "query": "\n        UPDATE indexed_files\n        SET program_id = NULL, status = 'duplicate', last_error = ?2\n        WHERE path = ?1\n        ",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Right": 2
+    },
+    "nullable": []
+  },
+  "hash": "814ca1ae4a59a58fa41714a3e439bcc9178c2654c29cc5508a3effeae12fb246"
+}
