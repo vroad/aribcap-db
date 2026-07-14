@@ -10,6 +10,10 @@ use serde::Deserialize;
 #[derive(Debug, Deserialize)]
 pub struct Config {
     pub url_template: String,
+
+    #[serde(default)]
+    pub unix_socket: Option<PathBuf>,
+
     pub streams: BTreeMap<String, StreamConfig>,
 
     #[serde(default)]
@@ -96,6 +100,26 @@ impl Config {
             .map(|(target, stream)| self.resolve_stream_config(target, stream))
             .collect()
     }
+
+    pub fn build_http_client(&self) -> Result<reqwest::Client> {
+        let builder = reqwest::Client::builder();
+
+        #[cfg(unix)]
+        let builder = match &self.unix_socket {
+            Some(path) => builder.unix_socket(path.as_path()),
+            None => builder,
+        };
+
+        #[cfg(not(unix))]
+        if let Some(path) = &self.unix_socket {
+            bail!(
+                "unix_socket is not supported on this platform: {}",
+                path.display()
+            );
+        }
+
+        builder.build().context("failed to build HTTP client")
+    }
 }
 
 pub fn render_url_template(template: &str, vars: &BTreeMap<String, String>) -> Result<String> {
@@ -129,6 +153,41 @@ vars.channel = "nhk"
             stream.url,
             "http://localhost:40772/api/timeshift/nhk/tuner-stream?post-filters[]=aribcap-dump"
         );
+    }
+
+    #[test]
+    fn parses_unix_socket() {
+        let config: Config = toml::from_str(
+            r#"
+url_template = "http://localhost/api/{{ channel }}"
+unix_socket = "/run/mirakc/mirakc.sock"
+
+[streams.nhk]
+vars.channel = "nhk"
+"#,
+        )
+        .unwrap();
+
+        assert_eq!(
+            config.unix_socket,
+            Some(PathBuf::from("/run/mirakc/mirakc.sock"))
+        );
+    }
+
+    #[test]
+    fn unix_socket_defaults_to_none() {
+        let config: Config = toml::from_str(
+            r#"
+url_template = "http://example.test/{{ channel }}"
+
+[streams.nhk]
+vars.channel = "nhk"
+"#,
+        )
+        .unwrap();
+
+        assert_eq!(config.unix_socket, None);
+        config.build_http_client().unwrap();
     }
 
     #[test]

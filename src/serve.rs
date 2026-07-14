@@ -32,6 +32,7 @@ pub async fn run(args: ServeArgs) -> Result<()> {
     logging::init_tracing(filter)?;
     let config = Config::load(&args.config)?;
     let targets = config.resolve_all_streams()?;
+    let client = config.build_http_client()?;
     let data_dir = resolve_data_dir(&args, config.serve.as_ref())?;
     let listen = resolve_listen(&args, config.serve.as_ref())?;
     let retention = resolve_retention(&args, config.serve.as_ref())?;
@@ -54,6 +55,7 @@ pub async fn run(args: ServeArgs) -> Result<()> {
     let signal = shutdown_signal();
     tokio::pin!(signal);
     let mut ingest_task = tokio::spawn(ingest_loop(
+        client,
         targets,
         store.clone(),
         live_broadcaster.clone(),
@@ -192,6 +194,7 @@ fn log_gc_dry_run(
 }
 
 async fn ingest_loop(
+    client: reqwest::Client,
     targets: Vec<crate::config::ResolvedStream>,
     store: Arc<Mutex<ArchiveStore>>,
     live_broadcaster: Arc<LiveBroadcaster>,
@@ -199,6 +202,7 @@ async fn ingest_loop(
 ) {
     retry_until_shutdown(RETRY_INTERVAL, &mut shutdown, move |attempt_shutdown| {
         run_ingest_once(
+            client.clone(),
             targets.clone(),
             store.clone(),
             live_broadcaster.clone(),
@@ -209,6 +213,7 @@ async fn ingest_loop(
 }
 
 async fn run_ingest_once(
+    client: reqwest::Client,
     targets: Vec<crate::config::ResolvedStream>,
     store: Arc<Mutex<ArchiveStore>>,
     live_broadcaster: Arc<LiveBroadcaster>,
@@ -218,6 +223,7 @@ async fn run_ingest_once(
     let line_store = store;
     let mut attempt_shutdown = shutdown.clone();
     let result = tail::tail_targets_isolated(
+        client,
         targets,
         move |stream_name| {
             let store = connect_store.clone();

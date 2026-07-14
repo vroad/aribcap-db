@@ -92,6 +92,12 @@ where
 
 #[cfg(test)]
 mod tests {
+    #[cfg(unix)]
+    use std::sync::{Arc, Mutex};
+
+    #[cfg(unix)]
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+
     use super::*;
 
     #[test]
@@ -157,5 +163,62 @@ mod tests {
         let chunk = b"{\"a\":1}\n".repeat(MAX_LINE_BYTES / 4);
         let lines = buffer.push_chunk(&chunk).unwrap();
         assert_eq!(lines.len(), MAX_LINE_BYTES / 4);
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn tails_http_stream_over_configured_unix_socket() {
+        use crate::config::Config;
+
+        let socket_path = std::env::temp_dir().join(format!(
+            "aribcap-db-stream-test-{}-{}.sock",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        let listener = tokio::net::UnixListener::bind(&socket_path).unwrap();
+        let server = tokio::spawn(async move {
+            let (mut connection, _) = listener.accept().await.unwrap();
+            let mut request = vec![0; 4096];
+            let bytes_read = connection.read(&mut request).await.unwrap();
+            let request = String::from_utf8_lossy(&request[..bytes_read]);
+            assert!(request.starts_with("GET /captions HTTP/1.1\r\n"));
+
+            let body = b"{\"text\":\"hello\"}\n";
+            let headers = format!(
+                "HTTP/1.1 200 OK\r\nContent-Type: application/x-ndjson\r\nContent-Length: {}\r\n\r\n",
+                body.len()
+            );
+            connection.write_all(headers.as_bytes()).await.unwrap();
+            connection.write_all(body).await.unwrap();
+        });
+
+        let config: Config = toml::from_str(&format!(
+            r#"
+url_template = "http://localhost/captions"
+unix_socket = "{}"
+
+[streams.test]
+"#,
+            socket_path.display()
+        ))
+        .unwrap();
+        let client = config.build_http_client().unwrap();
+        let lines = Arc::new(Mutex::new(Vec::new()));
+        let received = lines.clone();
+
+        let error = tail_once(&client, "http://localhost/captions", move |line| {
+            received.lock().unwrap().push(line);
+            std::future::ready(Ok(()))
+        })
+        .await
+        .unwrap_err();
+
+        server.await.unwrap();
+        std::fs::remove_file(socket_path).unwrap();
+        assert_eq!(error.to_string(), "stream ended");
+        assert_eq!(*lines.lock().unwrap(), vec![r#"{"text":"hello"}"#]);
     }
 }

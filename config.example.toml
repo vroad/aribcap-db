@@ -1,4 +1,6 @@
 url_template = "http://localhost:40772/api/timeshift/{{ channel }}/tuner-stream?post-filters[]=aribcap-dump"
+# Route every request through mirakc's Unix socket when configured.
+# unix_socket = "/run/mirakc/mirakc.sock"
 
 [streams.nhk]
 label = "NHK"

@@ -20,6 +20,7 @@ fn main() -> Result<()> {
     let args = Args::parse();
     let config = Config::load(&args.config)?;
     let targets = tail::resolve_targets(&config, &args.streams, args.all)?;
+    let client = config.build_http_client()?;
 
     let stdout = std::io::stdout();
     let stdout_is_terminal = stdout.is_terminal();
@@ -44,6 +45,7 @@ fn main() -> Result<()> {
         .build()
         .context("failed to start tokio runtime")?;
     let result = runtime.block_on(tail::tail_targets(
+        client,
         targets,
         move |event| {
             let output = output.clone();

@@ -45,6 +45,7 @@ pub fn resolve_targets(
 }
 
 pub async fn tail_targets<OnLine, OnLineFuture, ShutdownFuture>(
+    client: reqwest::Client,
     targets: Vec<ResolvedStream>,
     on_line: OnLine,
     shutdown: ShutdownFuture,
@@ -54,7 +55,6 @@ where
     OnLineFuture: Future<Output = Result<()>> + Send + 'static,
     ShutdownFuture: Future<Output = Result<()>> + Send,
 {
-    let client = reqwest::Client::new();
     let mut tasks = FuturesUnordered::new();
 
     for target in targets {
@@ -78,6 +78,7 @@ pub async fn tail_targets_isolated<
     OnLineFuture,
     ShutdownFuture,
 >(
+    client: reqwest::Client,
     targets: Vec<ResolvedStream>,
     on_connect: OnConnect,
     on_line: OnLine,
@@ -90,7 +91,6 @@ where
     OnLineFuture: Future<Output = Result<()>> + Send + 'static,
     ShutdownFuture: Future<Output = Result<()>> + Send,
 {
-    let client = reqwest::Client::new();
     let mut tasks = FuturesUnordered::new();
 
     for target in targets {
@@ -508,6 +508,7 @@ vars.channel = "nhk"
             .collect();
         let (shutdown_tx, shutdown_rx) = tokio::sync::oneshot::channel::<()>();
         let task = tokio::spawn(tail_targets_isolated(
+            reqwest::Client::new(),
             targets,
             before_connect,
             |_| async { Ok(()) },
