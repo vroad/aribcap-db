@@ -10,8 +10,21 @@
     flake-utils.lib.eachDefaultSystem (system:
       let
         pkgs = import nixpkgs { inherit system; };
+        aribcap-db = pkgs.rustPlatform.buildRustPackage {
+          pname = "aribcap-db";
+          version = "0.1.0";
+
+          src = ./.;
+
+          cargoLock.lockFile = ./Cargo.lock;
+        };
       in
       {
+        packages = {
+          default = aribcap-db;
+          inherit aribcap-db;
+        };
+
         devShells.default = pkgs.mkShell {
           packages = with pkgs; [
             cargo
