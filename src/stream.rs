@@ -197,6 +197,7 @@ mod tests {
 
         let config: Config = toml::from_str(&format!(
             r#"
+[upstream]
 url_template = "http://localhost/captions"
 unix_socket = "{}"
 

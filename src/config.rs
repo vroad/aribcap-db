@@ -9,15 +9,20 @@ use serde::Deserialize;
 
 #[derive(Debug, Deserialize)]
 pub struct Config {
-    pub url_template: String,
-
-    #[serde(default)]
-    pub unix_socket: Option<PathBuf>,
+    pub upstream: UpstreamConfig,
 
     pub streams: BTreeMap<String, StreamConfig>,
 
     #[serde(default)]
     pub serve: Option<ServeConfig>,
+}
+
+#[derive(Debug, Deserialize)]
+pub struct UpstreamConfig {
+    pub url_template: String,
+
+    #[serde(default)]
+    pub unix_socket: Option<PathBuf>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -75,7 +80,7 @@ impl Config {
         }
 
         let label = stream.label.as_deref().unwrap_or(target).to_owned();
-        let url = render_url_template(&self.url_template, &stream.vars)
+        let url = render_url_template(&self.upstream.url_template, &stream.vars)
             .with_context(|| format!("failed to resolve stream '{target}'"))?;
 
         Ok(ResolvedStream {
@@ -107,13 +112,13 @@ impl Config {
         let builder = reqwest::Client::builder();
 
         #[cfg(unix)]
-        let builder = match &self.unix_socket {
+        let builder = match &self.upstream.unix_socket {
             Some(path) => builder.unix_socket(path.as_path()),
             None => builder,
         };
 
         #[cfg(not(unix))]
-        if let Some(path) = &self.unix_socket {
+        if let Some(path) = &self.upstream.unix_socket {
             bail!(
                 "unix_socket is not supported on this platform: {}",
                 path.display()
@@ -138,6 +143,7 @@ mod tests {
     fn resolves_url_template_placeholders() {
         let config: Config = toml::from_str(
             r#"
+[upstream]
 url_template = "http://localhost:40772/api/timeshift/{{ channel }}/tuner-stream?post-filters[]=aribcap-dump"
 
 [streams.nhk]
@@ -161,6 +167,7 @@ vars.channel = "nhk"
     fn parses_unix_socket() {
         let config: Config = toml::from_str(
             r#"
+[upstream]
 url_template = "http://localhost/api/{{ channel }}"
 unix_socket = "/run/mirakc/mirakc.sock"
 
@@ -171,7 +178,7 @@ vars.channel = "nhk"
         .unwrap();
 
         assert_eq!(
-            config.unix_socket,
+            config.upstream.unix_socket,
             Some(PathBuf::from("/run/mirakc/mirakc.sock"))
         );
     }
@@ -180,6 +187,7 @@ vars.channel = "nhk"
     fn unix_socket_defaults_to_none() {
         let config: Config = toml::from_str(
             r#"
+[upstream]
 url_template = "http://example.test/{{ channel }}"
 
 [streams.nhk]
@@ -188,7 +196,7 @@ vars.channel = "nhk"
         )
         .unwrap();
 
-        assert_eq!(config.unix_socket, None);
+        assert_eq!(config.upstream.unix_socket, None);
         config.build_http_client().unwrap();
     }
 
@@ -196,6 +204,7 @@ vars.channel = "nhk"
     fn mcp_defaults_to_false_and_can_be_enabled() {
         let disabled: Config = toml::from_str(
             r#"
+[upstream]
 url_template = "http://example.test/{{ channel }}"
 
 [streams.nhk]
@@ -210,6 +219,7 @@ listen = "127.0.0.1:40773"
 
         let enabled: Config = toml::from_str(
             r#"
+[upstream]
 url_template = "http://example.test/{{ channel }}"
 
 [streams.nhk]
@@ -227,6 +237,7 @@ mcp = true
     fn rejects_missing_url_template_placeholders() {
         let config: Config = toml::from_str(
             r#"
+[upstream]
 url_template = "http://example.test/{{ channel }}/{{ missing }}"
 
 [streams.nhk]
@@ -247,6 +258,7 @@ vars.channel = "nhk"
     fn falls_back_to_target_name_for_label() {
         let config: Config = toml::from_str(
             r#"
+[upstream]
 url_template = "http://example.test/{{ channel }}"
 
 [streams.nhk]
@@ -264,6 +276,7 @@ vars.channel = "nhk"
     fn resolves_all_streams_in_stable_order() {
         let config: Config = toml::from_str(
             r#"
+[upstream]
 url_template = "http://example.test/{{ channel }}"
 
 [streams.nhk_e]
@@ -292,6 +305,7 @@ vars.channel = "nhk"
     fn rejects_stream_names_changed_by_sanitization() {
         let config: Config = toml::from_str(
             r#"
+[upstream]
 url_template = "http://example.test/{{ channel }}"
 
 [streams."bs:1"]
@@ -312,6 +326,7 @@ vars.channel = "bs1"
     fn rejects_empty_stream_name() {
         let config: Config = toml::from_str(
             r#"
+[upstream]
 url_template = "http://example.test/{{ channel }}"
 
 [streams.""]

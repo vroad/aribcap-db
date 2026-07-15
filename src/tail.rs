@@ -401,6 +401,7 @@ mod tests {
     fn resolve_targets_rejects_duplicate_streams() {
         let config: Config = toml::from_str(
             r#"
+[upstream]
 url_template = "http://example.test/{{ channel }}"
 
 [streams.nhk]
