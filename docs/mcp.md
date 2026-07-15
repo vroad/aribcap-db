@@ -66,10 +66,10 @@ Example result:
 }
 ```
 
-### `search_records`
+### `search_programs`
 
 Searches archived program titles, descriptions, and caption text. The result
-uses the same search behavior as `GET /api/records/search`.
+uses the same search behavior as `GET /api/programs/search`.
 
 Arguments:
 
@@ -128,7 +128,7 @@ Example result:
       "startTime": "2026-07-15T12:00:00+09:00",
       "title": "Program title",
       "description": "Program description",
-      "path": "/api/records/nhk/2026-07-15_12-00-00",
+      "path": "/api/programs/nhk/2026-07-15_12-00-00",
       "hits": [
         {
           "lineId": 1001,
@@ -152,10 +152,10 @@ Result behavior:
 | `startTime` | `null` when the program start time is unavailable. |
 | Caption hit `time` | `null` when the timestamp is unavailable. |
 
-### `get_record_captions`
+### `get_program_captions`
 
 Returns a bounded page of structured caption lines for one archived program.
-Use the `stream` and `recordingStartedAt` values from a `search_records` result
+Use the `stream` and `recordingStartedAt` values from a `search_programs` result
 as the `stream` and `recording_started_at` arguments.
 
 Arguments:
@@ -225,7 +225,7 @@ database is being prepared. During that period, calls to data tools fail with:
 search database is not ready
 ```
 
-Invalid arguments, an unavailable search database, and a missing record are
+Invalid arguments, an unavailable search database, and a missing program are
 reported as tool errors. Unexpected filesystem or database failures are logged
 by the server and reported to the client as `internal query error`.
 

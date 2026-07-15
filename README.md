@@ -5,7 +5,7 @@ Utilities for working with JSONL streams produced by `aribcap-dump`.
 ## Quick start
 
 `aribcap-db serve` subscribes to every stream in the config, stores raw JSONL,
-and serves the archives over HTTP.
+and serves archived programs over HTTP.
 
 ```sh
 cargo run --bin aribcap-db -- serve --config ./config.toml
@@ -30,9 +30,9 @@ Use [config.example.toml](config.example.toml) as a starting point.
 ```text
 GET /api/streams
 GET /api/months?stream=nhk
-GET /api/records?stream=nhk&month=2026-07
-GET /api/records/nhk/2026-07-14_12-00-00
-GET /api/records/search?q=caption
+GET /api/programs?stream=nhk&month=2026-07
+GET /api/programs/nhk/2026-07-14_12-00-00
+GET /api/programs/search?q=caption
 GET /api/live/nhk
 ```
 
@@ -40,7 +40,7 @@ Until the search database migrations finish, every endpoint except `/api/live`
 returns `503 Service Unavailable`.
 
 See the [HTTP API reference](docs/http-api.md) for request parameters, response
-behavior, record collisions, and live-stream delivery semantics.
+behavior, program collisions, and live-stream delivery semantics.
 
 ## MCP server
 
@@ -67,8 +67,8 @@ considerations.
 
 Recording starts with an EIT `present` record. Caption records received before
 the first EIT `present` record are skipped. Each program is written under
-`records/<stream>/<YYYY-MM>/`, and completed files older than the configured
-retention period are removed.
+`archive/<stream>/<YYYY-MM>/`, and completed archive files older than the
+configured retention period are removed.
 
 ### Service lifecycle
 
@@ -80,11 +80,11 @@ seconds for in-flight responses before closing them.
 ### Search index
 
 The search index is stored at `<data-dir>/search.sqlite3`. The background
-indexer scans existing archives at startup and then processes archive changes
-every 10 seconds.
+indexer scans existing archive files at startup and then processes archive
+changes every 10 seconds.
 
-To rebuild the index from all stored JSONL archives, stop `aribcap-db serve`
-for that data directory and run:
+To rebuild the index from all archive files in the program archive, stop
+`aribcap-db serve` for that data directory and run:
 
 ```sh
 aribcap-db search-rebuild --data-dir ./aribcap-db-data

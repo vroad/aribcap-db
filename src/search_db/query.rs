@@ -43,7 +43,7 @@ pub struct SearchProgram {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, FromRow)]
-pub struct IndexedRecord {
+pub struct IndexedProgram {
     pub stream: String,
     pub month: String,
     pub filename: String,
@@ -270,7 +270,7 @@ pub async fn search_captions(
 }
 
 /// Searches program titles and descriptions.
-pub async fn search_programs(
+pub async fn search_program_metadata(
     conn: &mut SqliteConnection,
     expression: &SearchExpression,
     filter: &SearchFilter<'_>,
@@ -356,7 +356,7 @@ pub async fn search_general(
     inner_hits: i64,
 ) -> Result<Vec<SearchProgram>> {
     let by_line = search_captions(conn, expression, filter, limit, inner_hits).await?;
-    let by_program = search_programs(conn, expression, filter, limit).await?;
+    let by_program = search_program_metadata(conn, expression, filter, limit).await?;
 
     let mut merged: Vec<SearchProgram> = Vec::new();
     let mut seen = HashSet::new();
@@ -382,12 +382,12 @@ pub async fn search_general(
     Ok(merged)
 }
 
-pub async fn list_indexed_records(
+pub async fn list_indexed_programs(
     conn: &mut SqliteConnection,
     stream: &str,
     month: &str,
-) -> Result<Vec<IndexedRecord>> {
-    sqlx::query_as::<_, IndexedRecord>(
+) -> Result<Vec<IndexedProgram>> {
+    sqlx::query_as::<_, IndexedProgram>(
         "
         SELECT
             p.stream,
@@ -408,12 +408,12 @@ pub async fn list_indexed_records(
     .map_err(Into::into)
 }
 
-pub async fn find_indexed_record(
+pub async fn find_indexed_program(
     conn: &mut SqliteConnection,
     stream: &str,
     recording_started_at: &str,
-) -> Result<Option<IndexedRecord>> {
-    sqlx::query_as::<_, IndexedRecord>(
+) -> Result<Option<IndexedProgram>> {
+    sqlx::query_as::<_, IndexedProgram>(
         "
         SELECT
             p.stream,
@@ -512,7 +512,7 @@ mod tests {
 
     async fn seed_search_db() -> SqliteConnection {
         let data_dir = temp_dir();
-        let records_root = data_dir.join("records");
+        let archive_root = data_dir.join("archive");
         let content = format!(
             "{}\n{}\n{}\n",
             eit_line_with_genre(10, "ニュース", "台風関連のニュース", 5, 2),
@@ -523,7 +523,7 @@ mod tests {
             caption_line("地震速報です", "2026-07-10T19:00:02.000+09:00")
         );
         write_file(
-            &records_root,
+            &archive_root,
             "nhk",
             "2026-07",
             "2026-07-10_19-00-00.news.jsonl",
@@ -536,7 +536,7 @@ mod tests {
             caption_line("明日は晴れです", "2026-07-10T20:00:01.000+09:00")
         );
         write_file(
-            &records_root,
+            &archive_root,
             "bs",
             "2026-07",
             "2026-07-10_20-00-00.weather.jsonl",
@@ -545,13 +545,13 @@ mod tests {
 
         let db_path = data_dir.join("search.sqlite3");
         let mut conn = open_and_migrate(&db_path).await.unwrap();
-        ingest_once(&mut conn, &records_root).await.unwrap();
+        ingest_once(&mut conn, &archive_root).await.unwrap();
         conn
     }
 
     async fn seed_many_caption_hits(count: usize) -> SqliteConnection {
         let data_dir = temp_dir();
-        let records_root = data_dir.join("records");
+        let archive_root = data_dir.join("archive");
         let mut content = format!("{}\n", eit_line_with_genre(10, "ニュース", "", 5, 2));
         for index in 0..count {
             content.push_str(&caption_line(
@@ -561,7 +561,7 @@ mod tests {
             content.push('\n');
         }
         write_file(
-            &records_root,
+            &archive_root,
             "nhk",
             "2026-07",
             "2026-07-10_19-00-00.news.jsonl",
@@ -571,7 +571,7 @@ mod tests {
         let mut conn = open_and_migrate(&data_dir.join("search.sqlite3"))
             .await
             .unwrap();
-        ingest_once(&mut conn, &records_root).await.unwrap();
+        ingest_once(&mut conn, &archive_root).await.unwrap();
         conn
     }
 
@@ -651,11 +651,11 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn search_programs_returns_metadata_match_without_hits() {
+    async fn search_program_metadata_returns_metadata_match_without_hits() {
         let mut conn = seed_search_db().await;
         let filter = SearchFilter::default();
 
-        let results = search_programs(&mut conn, &expression("ニュース"), &filter, 20)
+        let results = search_program_metadata(&mut conn, &expression("ニュース"), &filter, 20)
             .await
             .unwrap();
         assert_eq!(results.len(), 1);
@@ -847,7 +847,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn caption_page_returns_none_for_an_unknown_record() {
+    async fn caption_page_returns_none_for_an_unknown_program() {
         let mut conn = seed_search_db().await;
 
         let page = get_caption_page(&mut conn, "nhk", "2026-07-10_00-00-00", 1, 100)

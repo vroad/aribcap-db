@@ -39,7 +39,7 @@ pub async fn run(args: ServeArgs) -> Result<()> {
     let retention = resolve_retention(&args, config.serve.as_ref())?;
     let mcp_enabled = config.serve.as_ref().is_some_and(|serve| serve.mcp);
     archive::validate_retention(retention)?;
-    std::fs::create_dir_all(archive::records_root(&data_dir)).with_context(|| {
+    std::fs::create_dir_all(archive::archive_root(&data_dir)).with_context(|| {
         format!(
             "failed to create archive directory in {}",
             data_dir.display()
@@ -98,7 +98,7 @@ pub async fn run(args: ServeArgs) -> Result<()> {
     let (maintenance_shutdown_tx, maintenance_shutdown_rx) = watch::channel(false);
     let mut maintenance_task = tokio::spawn(archive_maintenance_loop(
         search_db_path.clone(),
-        archive::records_root(&data_dir),
+        archive::archive_root(&data_dir),
         store.clone(),
         retention,
         search_db_ready.clone(),
@@ -154,7 +154,7 @@ pub async fn run(args: ServeArgs) -> Result<()> {
                 tracing::error!(%error, "Service task stopped; restarting");
                 maintenance_task = tokio::spawn(archive_maintenance_loop(
                     search_db_path.clone(),
-                    archive::records_root(&data_dir),
+                    archive::archive_root(&data_dir),
                     store.clone(),
                     retention,
                     search_db_ready.clone(),
@@ -170,7 +170,7 @@ fn log_gc_dry_run(
     retention: Duration,
     data_dir: &std::path::Path,
 ) {
-    let records_root = archive::records_root(data_dir);
+    let archive_root = archive::archive_root(data_dir);
 
     match result {
         Ok(Ok(dry_run)) => tracing::info!(
@@ -178,21 +178,21 @@ fn log_gc_dry_run(
             retention = %humantime::format_duration(retention),
             cutoff = %dry_run.cutoff,
             interval = %humantime::format_duration(GC_INTERVAL),
-            records_root = %records_root.display(),
+            archive_root = %archive_root.display(),
             "Archive garbage collection dry run finished",
         ),
         Ok(Err(error)) => tracing::warn!(
             %error,
             retention = %humantime::format_duration(retention),
             interval = %humantime::format_duration(GC_INTERVAL),
-            records_root = %records_root.display(),
+            archive_root = %archive_root.display(),
             "Archive garbage collection dry run failed",
         ),
         Err(error) => tracing::warn!(
             %error,
             retention = %humantime::format_duration(retention),
             interval = %humantime::format_duration(GC_INTERVAL),
-            records_root = %records_root.display(),
+            archive_root = %archive_root.display(),
             "Archive garbage collection dry run task failed",
         ),
     }
@@ -362,7 +362,7 @@ async fn retry_until_shutdown<RunOnce, Run>(
 
 async fn archive_maintenance_loop(
     db_path: PathBuf,
-    records_root: PathBuf,
+    archive_root: PathBuf,
     store: Arc<Mutex<ArchiveStore>>,
     retention: Duration,
     search_db_ready: Arc<AtomicBool>,
@@ -371,7 +371,7 @@ async fn archive_maintenance_loop(
     loop {
         let result = search_db::run_archive_maintenance(
             db_path.clone(),
-            records_root.clone(),
+            archive_root.clone(),
             search_db::ArchiveMaintenanceConfig {
                 index_interval: SEARCH_INDEX_INTERVAL,
                 gc_interval: GC_INTERVAL,

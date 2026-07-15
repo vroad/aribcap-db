@@ -18,13 +18,13 @@ pub(super) fn temp_dir() -> PathBuf {
 }
 
 pub(super) fn write_file(
-    records_root: &Path,
+    archive_root: &Path,
     stream: &str,
     month: &str,
     filename: &str,
     content: &str,
 ) -> PathBuf {
-    let dir = records_root.join(stream).join(month);
+    let dir = archive_root.join(stream).join(month);
     fs::create_dir_all(&dir).unwrap();
     let path = dir.join(filename);
     fs::write(&path, content).unwrap();

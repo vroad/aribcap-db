@@ -58,7 +58,10 @@ pub struct Args {
 }
 
 #[derive(Debug, Parser)]
-#[command(name = "aribcap-db", about = "Store and serve aribcap JSONL records")]
+#[command(
+    name = "aribcap-db",
+    about = "Store and serve an aribcap JSONL program archive"
+)]
 pub struct DbArgs {
     #[command(subcommand)]
     pub command: DbCommand,
@@ -70,8 +73,8 @@ pub enum DbCommand {
     Serve(ServeArgs),
 
     #[command(
-        about = "Rebuild the SQLite search index from JSONL archives",
-        long_about = "Rebuild the SQLite search index from JSONL archives.\n\n\
+        about = "Rebuild the SQLite search index from the program archive",
+        long_about = "Rebuild the SQLite search index from the program archive.\n\n\
             Do not run this while `aribcap-db serve` is running against the \
             same data directory: rebuild deletes and recreates the search \
             database file, which the running server does not expect."
@@ -84,7 +87,11 @@ pub struct ServeArgs {
     #[arg(long, value_name = "PATH", help = "Path to the TOML config file")]
     pub config: PathBuf,
 
-    #[arg(long, value_name = "PATH", help = "Directory for stored JSONL records")]
+    #[arg(
+        long,
+        value_name = "PATH",
+        help = "Directory for the JSONL program archive"
+    )]
     pub data_dir: Option<PathBuf>,
 
     #[arg(
@@ -112,7 +119,11 @@ pub struct ServeArgs {
 
 #[derive(Debug, Parser)]
 pub struct SearchRebuildArgs {
-    #[arg(long, value_name = "PATH", help = "Directory for stored JSONL records")]
+    #[arg(
+        long,
+        value_name = "PATH",
+        help = "Directory for the JSONL program archive"
+    )]
     pub data_dir: PathBuf,
 }
 

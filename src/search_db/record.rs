@@ -147,12 +147,12 @@ pub(super) fn caption_from_value(value: &Value) -> Option<CaptionRecord> {
 }
 
 /// Extracts the stream, month, and filename from a valid archive path.
-/// Returns `None` unless the path has exactly three components under `records_root`.
+/// Returns `None` unless the path has exactly three components under `archive_root`.
 pub(super) fn stream_month_filename(
-    records_root: &Path,
+    archive_root: &Path,
     path: &Path,
 ) -> Option<(String, String, String)> {
-    let rel = path.strip_prefix(records_root).ok()?;
+    let rel = path.strip_prefix(archive_root).ok()?;
     let mut components = rel.components();
     let stream = components.next()?.as_os_str().to_str()?.to_owned();
     let month = components.next()?.as_os_str().to_str()?.to_owned();
@@ -165,12 +165,12 @@ pub(super) fn stream_month_filename(
     Some((stream, month, filename))
 }
 
-pub(super) fn scan_jsonl_files(records_root: &Path) -> Vec<PathBuf> {
-    if !records_root.exists() {
+pub(super) fn scan_jsonl_files(archive_root: &Path) -> Vec<PathBuf> {
+    if !archive_root.exists() {
         return Vec::new();
     }
 
-    WalkDir::new(records_root)
+    WalkDir::new(archive_root)
         .into_iter()
         .filter_map(|entry| entry.ok())
         .filter(|entry| {

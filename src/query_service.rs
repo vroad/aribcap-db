@@ -120,15 +120,15 @@ pub struct ListStreamsResponse {
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, JsonSchema)]
 #[serde(rename_all = "camelCase")]
-pub struct RecordCaptionsResponse {
-    pub program: RecordProgram,
-    pub captions: Vec<RecordCaption>,
+pub struct ProgramCaptionsResponse {
+    pub program: ProgramSummary,
+    pub captions: Vec<ProgramCaption>,
     pub next_start_line: Option<i64>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, JsonSchema)]
 #[serde(rename_all = "camelCase")]
-pub struct RecordProgram {
+pub struct ProgramSummary {
     pub program_id: i64,
     pub stream: String,
     pub recording_started_at: String,
@@ -140,7 +140,7 @@ pub struct RecordProgram {
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, JsonSchema)]
 #[serde(rename_all = "camelCase")]
-pub struct RecordCaption {
+pub struct ProgramCaption {
     pub line_id: i64,
     pub line_no: i64,
     pub time: Option<String>,
@@ -166,7 +166,7 @@ impl From<search_db::SearchHit> for SearchHitItem {
     }
 }
 
-impl From<search_db::ProgramDetails> for RecordProgram {
+impl From<search_db::ProgramDetails> for ProgramSummary {
     fn from(program: search_db::ProgramDetails) -> Self {
         let search_db::ProgramDetails {
             program_id,
@@ -189,7 +189,7 @@ impl From<search_db::ProgramDetails> for RecordProgram {
     }
 }
 
-impl From<search_db::CaptionLine> for RecordCaption {
+impl From<search_db::CaptionLine> for ProgramCaption {
     fn from(caption: search_db::CaptionLine) -> Self {
         let search_db::CaptionLine {
             line_id,
@@ -287,11 +287,11 @@ impl ArchiveQueryService {
         blocking_io(move || archive::list_months(&data_dir, &stream)).await
     }
 
-    pub async fn list_records(
+    pub async fn list_programs(
         &self,
         stream: String,
         month: String,
-    ) -> Result<Vec<archive::RecordEntry>, QueryServiceError> {
+    ) -> Result<Vec<archive::ProgramEntry>, QueryServiceError> {
         self.require_ready()?;
         archive::validate_stream_component(&stream).map_err(QueryServiceError::from)?;
         archive::validate_month_component(&month).map_err(QueryServiceError::from)?;
@@ -300,22 +300,22 @@ impl ArchiveQueryService {
             .acquire()
             .await
             .map_err(QueryServiceError::internal)?;
-        let records = search_db::list_indexed_records(&mut connection, &stream, &month)
+        let programs = search_db::list_indexed_programs(&mut connection, &stream, &month)
             .await
             .map_err(QueryServiceError::internal)?
             .into_iter()
-            .map(|record| archive::RecordEntry {
-                path: record_api_path(&record.stream, &record.recording_started_at),
-                stream: record.stream,
-                month: record.month,
-                filename: record.filename,
-                size_bytes: u64::try_from(record.size_bytes).unwrap_or(0),
+            .map(|program| archive::ProgramEntry {
+                path: program_api_path(&program.stream, &program.recording_started_at),
+                stream: program.stream,
+                month: program.month,
+                filename: program.filename,
+                size_bytes: u64::try_from(program.size_bytes).unwrap_or(0),
             })
             .collect();
-        Ok(records)
+        Ok(programs)
     }
 
-    pub async fn resolve_record_path(
+    pub async fn resolve_program_path(
         &self,
         stream: String,
         recording_started_at: String,
@@ -329,19 +329,24 @@ impl ArchiveQueryService {
             .acquire()
             .await
             .map_err(QueryServiceError::internal)?;
-        let Some(record) =
-            search_db::find_indexed_record(&mut connection, &stream, &recording_started_at)
+        let Some(program) =
+            search_db::find_indexed_program(&mut connection, &stream, &recording_started_at)
                 .await
                 .map_err(QueryServiceError::internal)?
         else {
-            return Err(QueryServiceError::NotFound("record not found".to_owned()));
+            return Err(QueryServiceError::NotFound("program not found".to_owned()));
         };
         let data_dir = self.data_dir.clone();
         let path = blocking_io(move || {
-            archive::resolve_record_path(&data_dir, &record.stream, &record.month, &record.filename)
+            archive::resolve_archive_file_path(
+                &data_dir,
+                &program.stream,
+                &program.month,
+                &program.filename,
+            )
         })
         .await?;
-        path.ok_or_else(|| QueryServiceError::NotFound("record not found".to_owned()))
+        path.ok_or_else(|| QueryServiceError::NotFound("program not found".to_owned()))
     }
 
     pub async fn search(&self, query: SearchRequest) -> Result<SearchResponse, QueryServiceError> {
@@ -380,7 +385,8 @@ impl ArchiveQueryService {
                     .await
             }
             SearchMode::Program(expression) => {
-                search_db::search_programs(&mut connection, &expression, &filter, limit).await
+                search_db::search_program_metadata(&mut connection, &expression, &filter, limit)
+                    .await
             }
             SearchMode::Line(expression) => {
                 search_db::search_captions(&mut connection, &expression, &filter, limit, inner_hits)
@@ -404,7 +410,7 @@ impl ArchiveQueryService {
             .into_iter()
             .map(|program| SearchResultItem {
                 program_id: program.program_id,
-                path: record_api_path(&program.stream, &program.recording_started_at),
+                path: program_api_path(&program.stream, &program.recording_started_at),
                 stream: program.stream,
                 recording_started_at: program.recording_started_at,
                 start_time: program.start_time,
@@ -416,13 +422,13 @@ impl ArchiveQueryService {
         Ok(SearchResponse { items })
     }
 
-    pub async fn get_record_captions(
+    pub async fn get_program_captions(
         &self,
         stream: String,
         recording_started_at: String,
         start_line: Option<i64>,
         limit: Option<i64>,
-    ) -> Result<RecordCaptionsResponse, QueryServiceError> {
+    ) -> Result<ProgramCaptionsResponse, QueryServiceError> {
         self.require_ready()?;
         archive::validate_stream_component(&stream).map_err(QueryServiceError::from)?;
         archive::validate_recording_started_at(&recording_started_at)
@@ -451,7 +457,7 @@ impl ArchiveQueryService {
         .await
         .map_err(QueryServiceError::internal)?
         else {
-            return Err(QueryServiceError::NotFound("record not found".to_owned()));
+            return Err(QueryServiceError::NotFound("program not found".to_owned()));
         };
 
         let next_start_line = if page.has_more {
@@ -459,7 +465,7 @@ impl ArchiveQueryService {
         } else {
             None
         };
-        Ok(RecordCaptionsResponse {
+        Ok(ProgramCaptionsResponse {
             program: page.program.into(),
             captions: page.captions.into_iter().map(Into::into).collect(),
             next_start_line,
@@ -467,9 +473,9 @@ impl ArchiveQueryService {
     }
 }
 
-pub fn record_api_path(stream: &str, recording_started_at: &str) -> String {
+pub fn program_api_path(stream: &str, recording_started_at: &str) -> String {
     format!(
-        "/api/records/{}/{}",
+        "/api/programs/{}/{}",
         urlencoding::encode(stream),
         urlencoding::encode(recording_started_at)
     )
@@ -603,7 +609,7 @@ mod tests {
         let (data_dir, service) = seeded_service(501).await;
 
         let default_page = service
-            .get_record_captions("nhk".into(), RECORDING_STARTED_AT.into(), None, None)
+            .get_program_captions("nhk".into(), RECORDING_STARTED_AT.into(), None, None)
             .await
             .unwrap();
         assert_eq!(default_page.captions.len(), 100);
@@ -611,14 +617,14 @@ mod tests {
         assert_eq!(default_page.next_start_line, Some(103));
 
         let after_gap = service
-            .get_record_captions("nhk".into(), RECORDING_STARTED_AT.into(), Some(3), Some(1))
+            .get_program_captions("nhk".into(), RECORDING_STARTED_AT.into(), Some(3), Some(1))
             .await
             .unwrap();
         assert_eq!(after_gap.captions[0].line_no, 4);
         assert_eq!(after_gap.next_start_line, Some(5));
 
         let capped_page = service
-            .get_record_captions(
+            .get_program_captions(
                 "nhk".into(),
                 RECORDING_STARTED_AT.into(),
                 Some(1),
@@ -630,7 +636,7 @@ mod tests {
         assert_eq!(capped_page.next_start_line, Some(503));
 
         let final_page = service
-            .get_record_captions(
+            .get_program_captions(
                 "nhk".into(),
                 RECORDING_STARTED_AT.into(),
                 Some(503),
@@ -643,13 +649,13 @@ mod tests {
         assert_eq!(final_page.next_start_line, None);
 
         let invalid_start = service
-            .get_record_captions("nhk".into(), RECORDING_STARTED_AT.into(), Some(0), None)
+            .get_program_captions("nhk".into(), RECORDING_STARTED_AT.into(), Some(0), None)
             .await
             .unwrap_err();
         assert!(matches!(invalid_start, QueryServiceError::BadRequest(_)));
 
         let missing = service
-            .get_record_captions("nhk".into(), "2026-07-15_13-00-00".into(), None, None)
+            .get_program_captions("nhk".into(), "2026-07-15_13-00-00".into(), None, None)
             .await
             .unwrap_err();
         assert!(matches!(missing, QueryServiceError::NotFound(_)));
@@ -665,8 +671,8 @@ mod tests {
             std::process::id()
         ));
         let _ = fs::remove_dir_all(&data_dir);
-        let record_dir = archive::records_root(&data_dir).join("nhk").join("2026-07");
-        fs::create_dir_all(&record_dir).unwrap();
+        let month_dir = archive::archive_root(&data_dir).join("nhk").join("2026-07");
+        fs::create_dir_all(&month_dir).unwrap();
 
         let mut body = String::from(
             "{\"type\":\"eit\",\"section\":\"present\",\"startTime\":\"2026-07-15T12:00:00.000+09:00\",\"durationSec\":1800,\"shortEvents\":[{\"languageCode\":\"jpn\",\"eventName\":\"program title\",\"text\":\"program description\"}]}\n",
@@ -679,11 +685,11 @@ mod tests {
                 "{{\"type\":\"caption\",\"time\":\"2026-07-15T12:00:01.000+09:00\",\"text\":\"caption {index}\",\"durationMs\":500,\"languageCode\":\"jpn\"}}\n"
             ));
         }
-        fs::write(record_dir.join("2026-07-15_12-00-00.program.jsonl"), body).unwrap();
+        fs::write(month_dir.join("2026-07-15_12-00-00.program.jsonl"), body).unwrap();
 
         let db_path = search_db::search_db_path(&data_dir);
         let mut connection = search_db::open_and_migrate(&db_path).await.unwrap();
-        search_db::ingest_once(&mut connection, &archive::records_root(&data_dir))
+        search_db::ingest_once(&mut connection, &archive::archive_root(&data_dir))
             .await
             .unwrap();
         drop(connection);

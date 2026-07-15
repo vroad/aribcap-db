@@ -398,8 +398,8 @@ async fn insert_caption_line(
     Ok(())
 }
 
-async fn ingest_file(conn: &mut SqliteConnection, records_root: &Path, path: &Path) -> Result<()> {
-    let Some((stream, month, filename)) = stream_month_filename(records_root, path) else {
+async fn ingest_file(conn: &mut SqliteConnection, archive_root: &Path, path: &Path) -> Result<()> {
+    let Some((stream, month, filename)) = stream_month_filename(archive_root, path) else {
         return Ok(());
     };
 
@@ -542,7 +542,7 @@ async fn ingest_file(conn: &mut SqliteConnection, records_root: &Path, path: &Pa
 /// Attempts to index every given path and returns an error if any path fails.
 pub async fn ingest_paths(
     conn: &mut SqliteConnection,
-    records_root: &Path,
+    archive_root: &Path,
     paths: impl IntoIterator<Item = PathBuf>,
 ) -> Result<()> {
     let mut first_error: Option<anyhow::Error> = None;
@@ -561,7 +561,7 @@ pub async fn ingest_paths(
             }
         };
         // Keep program replacement and caption cleanup in the same transaction.
-        match ingest_file(&mut tx, records_root, &path).await {
+        match ingest_file(&mut tx, archive_root, &path).await {
             Ok(()) => {
                 if let Err(error) = tx.commit().await {
                     tracing::warn!(path = %path.display(), %error, "Failed to commit ingest transaction");
@@ -586,9 +586,9 @@ pub async fn ingest_paths(
     }
 }
 
-/// Scans `records_root` and indexes new data in its JSONL archive files.
-pub async fn ingest_once(conn: &mut SqliteConnection, records_root: &Path) -> Result<()> {
-    ingest_paths(conn, records_root, scan_jsonl_files(records_root)).await
+/// Scans `archive_root` and indexes new data in its JSONL archive files.
+pub async fn ingest_once(conn: &mut SqliteConnection, archive_root: &Path) -> Result<()> {
+    ingest_paths(conn, archive_root, scan_jsonl_files(archive_root)).await
 }
 
 /// Deletes the `programs`/`indexed_files` rows for `path`. `ON DELETE
@@ -641,7 +641,7 @@ mod tests {
     use super::*;
 
     struct IngestFixture {
-        records_root: PathBuf,
+        archive_root: PathBuf,
         db_path: PathBuf,
         conn: SqliteConnection,
     }
@@ -649,11 +649,11 @@ mod tests {
     impl IngestFixture {
         async fn new() -> Self {
             let data_dir = temp_dir();
-            let records_root = data_dir.join("records");
+            let archive_root = data_dir.join("archive");
             let db_path = data_dir.join("search.sqlite3");
             let conn = open_and_migrate(&db_path).await.unwrap();
             Self {
-                records_root,
+                archive_root,
                 db_path,
                 conn,
             }
@@ -661,7 +661,7 @@ mod tests {
 
         fn write_program(&self, filename: &str, event_id: u64, title: &str) -> PathBuf {
             write_file(
-                &self.records_root,
+                &self.archive_root,
                 "nhk",
                 "2026-07",
                 filename,
@@ -670,7 +670,7 @@ mod tests {
         }
 
         async fn ingest_all(&mut self) {
-            ingest_once(&mut self.conn, &self.records_root)
+            ingest_once(&mut self.conn, &self.archive_root)
                 .await
                 .unwrap();
         }
@@ -715,7 +715,7 @@ mod tests {
 
     fn write_first_collision_program(fixture: &IngestFixture) -> PathBuf {
         write_file(
-            &fixture.records_root,
+            &fixture.archive_root,
             "nhk",
             "2026-07",
             "2026-07-10_19-00-00.first.jsonl",
@@ -730,7 +730,7 @@ mod tests {
     fn write_complete_collision(fixture: &IngestFixture) -> (PathBuf, PathBuf) {
         let first_path = write_first_collision_program(fixture);
         let second_path = write_file(
-            &fixture.records_root,
+            &fixture.archive_root,
             "nhk",
             "2026-07",
             "2026-07-10_19-00-00.second.jsonl",
@@ -750,7 +750,7 @@ mod tests {
     fn write_collision_without_second_eit(fixture: &IngestFixture) -> (PathBuf, PathBuf) {
         let first_path = write_first_collision_program(fixture);
         let second_path = write_file(
-            &fixture.records_root,
+            &fixture.archive_root,
             "nhk",
             "2026-07",
             "2026-07-10_19-00-00.second.jsonl",
@@ -771,7 +771,7 @@ mod tests {
         content.push('\n');
         content.push_str(&caption_line("台風が接近", "2026-07-10T19:00:01.000+09:00"));
         content.push('\n');
-        let path = write_file(&fixture.records_root, "nhk", "2026-07", filename, &content);
+        let path = write_file(&fixture.archive_root, "nhk", "2026-07", filename, &content);
 
         fixture.ingest_all().await;
         let program_id: i64 = sqlx::query_scalar("SELECT id FROM programs WHERE path = ?1")
@@ -806,7 +806,7 @@ mod tests {
     async fn newer_eit_replaces_program_genres() {
         let mut fixture = IngestFixture::new().await;
         let path = write_file(
-            &fixture.records_root,
+            &fixture.archive_root,
             "nhk",
             "2026-07",
             "2026-07-10_19-00-00.news.jsonl",
@@ -836,7 +836,7 @@ mod tests {
         let complete = format!("{}\n", eit_line(10, "ニュース", ""));
         let incomplete = "{\"type\":\"caption\",\"text\":\"incomplete";
         let path = write_file(
-            &fixture.records_root,
+            &fixture.archive_root,
             "nhk",
             "2026-07",
             "2026-07-10_19-00-00.news.jsonl",
@@ -854,7 +854,7 @@ mod tests {
     async fn ingest_indexes_single_character_caption_in_fts() {
         let mut fixture = IngestFixture::new().await;
         let path = write_file(
-            &fixture.records_root,
+            &fixture.archive_root,
             "nhk",
             "2026-07",
             "2026-07-10_19-00-00.news.jsonl",
@@ -926,7 +926,7 @@ mod tests {
         let mut fixture = IngestFixture::new().await;
         let path = fixture.write_program("2026-07-10_19-00-00.news.jsonl", 10, "ニュース");
 
-        ingest_paths(&mut fixture.conn, &fixture.records_root, [path])
+        ingest_paths(&mut fixture.conn, &fixture.archive_root, [path])
             .await
             .unwrap();
 
@@ -938,14 +938,14 @@ mod tests {
         let mut fixture = IngestFixture::new().await;
         let good_path = fixture.write_program("2026-07-10_19-00-00.news.jsonl", 1, "ニュース");
         let bad_path = fixture
-            .records_root
+            .archive_root
             .join("nhk")
             .join("2026-07")
             .join("2026-07-10_18-00-00.missing.jsonl");
 
         let error = ingest_paths(
             &mut fixture.conn,
-            &fixture.records_root,
+            &fixture.archive_root,
             [bad_path.clone(), good_path],
         )
         .await
@@ -964,7 +964,7 @@ mod tests {
             .await
             .unwrap();
 
-        let result = ingest_paths(&mut fixture.conn, &fixture.records_root, [path]).await;
+        let result = ingest_paths(&mut fixture.conn, &fixture.archive_root, [path]).await;
 
         assert!(result.is_err());
         assert_eq!(fixture.program_count().await, 0);
@@ -978,7 +978,7 @@ mod tests {
     async fn ingest_once_skips_files_with_unparseable_names() {
         let mut fixture = IngestFixture::new().await;
         write_file(
-            &fixture.records_root,
+            &fixture.archive_root,
             "nhk",
             "2026-07",
             "deadbeef1234.jsonl",
@@ -1067,7 +1067,7 @@ mod tests {
         drop(fixture.conn);
         fs::remove_file(&fixture.db_path).unwrap();
         let mut rebuilt = open_and_migrate(&fixture.db_path).await.unwrap();
-        ingest_once(&mut rebuilt, &fixture.records_root)
+        ingest_once(&mut rebuilt, &fixture.archive_root)
             .await
             .unwrap();
         let rebuilt_path: String = sqlx::query_scalar("SELECT path FROM programs")

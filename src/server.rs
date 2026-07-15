@@ -52,11 +52,11 @@ pub fn router(
     let archive_routes = Router::new()
         .route("/api/streams", get(api_streams))
         .route("/api/months", get(api_months))
-        .route("/api/records", get(api_records))
-        .route("/api/records/search", get(api_search))
+        .route("/api/programs", get(api_programs))
+        .route("/api/programs/search", get(api_search))
         .route(
-            "/api/records/{stream}/{recording_started_at}",
-            get(raw_record),
+            "/api/programs/{stream}/{recording_started_at}",
+            get(raw_program),
         )
         .route_layer(middleware::from_fn(move |request, next| {
             require_search_db(search_db_ready.clone(), request, next)
@@ -116,14 +116,14 @@ async fn api_months(
         .map_err(Into::into)
 }
 
-async fn api_records(
+async fn api_programs(
     State(state): State<AppState>,
-    query: Result<Query<RecordsQuery>, QueryRejection>,
-) -> Result<Json<Vec<archive::RecordEntry>>, HttpError> {
+    query: Result<Query<ProgramsQuery>, QueryRejection>,
+) -> Result<Json<Vec<archive::ProgramEntry>>, HttpError> {
     let Query(query) = query?;
     state
         .query_service
-        .list_records(query.stream, query.month)
+        .list_programs(query.stream, query.month)
         .await
         .map(Json)
         .map_err(Into::into)
@@ -142,14 +142,14 @@ async fn api_search(
         .map_err(Into::into)
 }
 
-async fn raw_record(
+async fn raw_program(
     State(state): State<AppState>,
     path: Result<Path<(String, String)>, PathRejection>,
 ) -> Result<Response, HttpError> {
     let Path((stream, recording_started_at)) = path?;
     let path = state
         .query_service
-        .resolve_record_path(stream, recording_started_at)
+        .resolve_program_path(stream, recording_started_at)
         .await?;
 
     let file = tokio::fs::File::open(path)
@@ -217,7 +217,7 @@ struct StreamQuery {
 }
 
 #[derive(Debug, Deserialize)]
-struct RecordsQuery {
+struct ProgramsQuery {
     stream: String,
     month: String,
 }
@@ -305,15 +305,15 @@ mod tests {
     use crate::search_db;
 
     static NEXT_TEMP_DIR: AtomicUsize = AtomicUsize::new(0);
-    const RECORD_FILENAME: &str = "2020-01-01_00-00-00.title#part.jsonl";
-    const RECORD_BODY: &str = "{\"type\":\"eit\",\"section\":\"present\",\"startTime\":\"2020-01-01T00:00:00.000+09:00\",\"durationSec\":1800,\"shortEvents\":[{\"languageCode\":\"jpn\",\"eventName\":\"title\"}]}\n{\"type\":\"caption\",\"time\":\"2020-01-01T00:00:01.000+09:00\",\"text\":\"caption\",\"languageCode\":\"jpn\",\"durationMs\":500}\n{\"type\":\"caption\",\"time\":\"2020-01-01T00:00:02.000+09:00\",\"text\":\"second caption\",\"languageCode\":\"jpn\",\"durationMs\":600}\n";
-    const OTHER_RECORD_FILENAME: &str = "2020-01-02_00-00-00.other.jsonl";
-    const OTHER_RECORD_BODY: &str = "{\"type\":\"eit\",\"section\":\"present\",\"startTime\":\"2020-01-02T00:00:00.000+09:00\",\"durationSec\":1800,\"shortEvents\":[{\"languageCode\":\"jpn\",\"eventName\":\"other title\"}]}\n{\"type\":\"caption\",\"time\":\"2020-01-02T00:00:01.000+09:00\",\"text\":\"caption\",\"languageCode\":\"jpn\",\"durationMs\":500}\n";
-    const RAW_RECORD_PATH: &str = "/api/records/nhk/2020-01-01_00-00-00";
+    const ARCHIVE_FILE_NAME: &str = "2020-01-01_00-00-00.title#part.jsonl";
+    const ARCHIVE_FILE_BODY: &str = "{\"type\":\"eit\",\"section\":\"present\",\"startTime\":\"2020-01-01T00:00:00.000+09:00\",\"durationSec\":1800,\"shortEvents\":[{\"languageCode\":\"jpn\",\"eventName\":\"title\"}]}\n{\"type\":\"caption\",\"time\":\"2020-01-01T00:00:01.000+09:00\",\"text\":\"caption\",\"languageCode\":\"jpn\",\"durationMs\":500}\n{\"type\":\"caption\",\"time\":\"2020-01-01T00:00:02.000+09:00\",\"text\":\"second caption\",\"languageCode\":\"jpn\",\"durationMs\":600}\n";
+    const OTHER_ARCHIVE_FILE_NAME: &str = "2020-01-02_00-00-00.other.jsonl";
+    const OTHER_ARCHIVE_FILE_BODY: &str = "{\"type\":\"eit\",\"section\":\"present\",\"startTime\":\"2020-01-02T00:00:00.000+09:00\",\"durationSec\":1800,\"shortEvents\":[{\"languageCode\":\"jpn\",\"eventName\":\"other title\"}]}\n{\"type\":\"caption\",\"time\":\"2020-01-02T00:00:01.000+09:00\",\"text\":\"caption\",\"languageCode\":\"jpn\",\"durationMs\":500}\n";
+    const RAW_PROGRAM_PATH: &str = "/api/programs/nhk/2020-01-01_00-00-00";
 
     #[tokio::test]
-    async fn archive_routes_list_and_stream_record() {
-        let (data_dir, app) = app_with_record().await;
+    async fn archive_routes_list_and_stream_program() {
+        let (data_dir, app) = app_with_program().await;
 
         let response = get(&app, "/api/streams").await;
         assert_eq!(response.status(), StatusCode::OK);
@@ -323,35 +323,35 @@ mod tests {
         assert_eq!(response.status(), StatusCode::OK);
         assert_eq!(body_text(response).await, r#"["2020-01"]"#);
 
-        let response = get(&app, "/api/records?stream=nhk&month=2020-01").await;
+        let response = get(&app, "/api/programs?stream=nhk&month=2020-01").await;
         assert_eq!(response.status(), StatusCode::OK);
-        let records: Vec<serde_json::Value> =
+        let programs: Vec<serde_json::Value> =
             serde_json::from_str(&body_text(response).await).unwrap();
-        assert_eq!(records.len(), 1);
-        assert_eq!(records[0]["filename"], RECORD_FILENAME);
-        assert_eq!(records[0]["path"], RAW_RECORD_PATH);
+        assert_eq!(programs.len(), 1);
+        assert_eq!(programs[0]["filename"], ARCHIVE_FILE_NAME);
+        assert_eq!(programs[0]["path"], RAW_PROGRAM_PATH);
 
-        let response = get(&app, RAW_RECORD_PATH).await;
+        let response = get(&app, RAW_PROGRAM_PATH).await;
         assert_eq!(response.status(), StatusCode::OK);
         assert_eq!(
             response.headers()[header::CONTENT_TYPE],
             "application/x-ndjson"
         );
-        assert_eq!(body_text(response).await, RECORD_BODY);
+        assert_eq!(body_text(response).await, ARCHIVE_FILE_BODY);
 
-        let response = get(&app, "/api/records/search?q=caption").await;
+        let response = get(&app, "/api/programs/search?q=caption").await;
         assert_eq!(response.status(), StatusCode::OK);
         let search: serde_json::Value = serde_json::from_str(&body_text(response).await).unwrap();
-        assert_eq!(search["items"][0]["path"], RAW_RECORD_PATH);
+        assert_eq!(search["items"][0]["path"], RAW_PROGRAM_PATH);
 
         fs::remove_dir_all(data_dir).unwrap();
     }
 
     #[tokio::test]
     async fn search_without_stream_covers_all_streams_for_http_and_mcp() {
-        let (data_dir, app) = app_with_records_mcp().await;
+        let (data_dir, app) = app_with_programs_mcp().await;
 
-        let response = get(&app, "/api/records/search?q=caption").await;
+        let response = get(&app, "/api/programs/search?q=caption").await;
         assert_eq!(response.status(), StatusCode::OK);
         let search: serde_json::Value = serde_json::from_str(&body_text(response).await).unwrap();
         let streams = search["items"]
@@ -362,7 +362,7 @@ mod tests {
             .collect::<Vec<_>>();
         assert_eq!(streams, ["bs", "nhk"]);
 
-        let response = get(&app, "/api/records/search?q=caption&stream=nhk").await;
+        let response = get(&app, "/api/programs/search?q=caption&stream=nhk").await;
         let search: serde_json::Value = serde_json::from_str(&body_text(response).await).unwrap();
         assert_eq!(search["items"].as_array().unwrap().len(), 1);
         assert_eq!(search["items"][0]["stream"], "nhk");
@@ -391,7 +391,7 @@ mod tests {
 
         let response = mcp_post(
             &app,
-            r#"{"jsonrpc":"2.0","id":2,"method":"tools/call","params":{"name":"search_records","arguments":{"q":"caption"}}}"#,
+            r#"{"jsonrpc":"2.0","id":2,"method":"tools/call","params":{"name":"search_programs","arguments":{"q":"caption"}}}"#,
             Some(&session_id),
         )
         .await;
@@ -410,62 +410,62 @@ mod tests {
     #[tokio::test]
     async fn archive_routes_return_only_the_collision_winner() {
         let data_dir = temp_dir();
-        let record_dir = archive::records_root(&data_dir).join("nhk").join("2020-01");
-        fs::create_dir_all(&record_dir).unwrap();
-        fs::write(record_dir.join(RECORD_FILENAME), RECORD_BODY).unwrap();
+        let month_dir = archive::archive_root(&data_dir).join("nhk").join("2020-01");
+        fs::create_dir_all(&month_dir).unwrap();
+        fs::write(month_dir.join(ARCHIVE_FILE_NAME), ARCHIVE_FILE_BODY).unwrap();
         fs::write(
-            record_dir.join("2020-01-01_00-00-00.title#part.1.jsonl"),
+            month_dir.join("2020-01-01_00-00-00.title#part.1.jsonl"),
             "{\"type\":\"eit\",\"section\":\"present\",\"shortEvents\":[{\"eventName\":\"loser\"}]}\n",
         )
         .unwrap();
         let db_path = search_db::search_db_path(&data_dir);
         let mut connection = search_db::open_and_migrate(&db_path).await.unwrap();
-        search_db::ingest_once(&mut connection, &archive::records_root(&data_dir))
+        search_db::ingest_once(&mut connection, &archive::archive_root(&data_dir))
             .await
             .unwrap();
         drop(connection);
         let app = test_router(data_dir.clone(), Arc::new(LiveBroadcaster::new([])));
 
-        let response = get(&app, "/api/records?stream=nhk&month=2020-01").await;
-        let records: Vec<serde_json::Value> =
+        let response = get(&app, "/api/programs?stream=nhk&month=2020-01").await;
+        let programs: Vec<serde_json::Value> =
             serde_json::from_str(&body_text(response).await).unwrap();
-        assert_eq!(records.len(), 1);
-        assert_eq!(records[0]["filename"], RECORD_FILENAME);
-        assert_eq!(records[0]["path"], RAW_RECORD_PATH);
+        assert_eq!(programs.len(), 1);
+        assert_eq!(programs[0]["filename"], ARCHIVE_FILE_NAME);
+        assert_eq!(programs[0]["path"], RAW_PROGRAM_PATH);
 
-        let response = get(&app, RAW_RECORD_PATH).await;
+        let response = get(&app, RAW_PROGRAM_PATH).await;
         assert_eq!(response.status(), StatusCode::OK);
-        assert_eq!(body_text(response).await, RECORD_BODY);
+        assert_eq!(body_text(response).await, ARCHIVE_FILE_BODY);
 
         fs::remove_dir_all(data_dir).unwrap();
     }
 
     #[tokio::test]
-    async fn archive_routes_reject_invalid_or_missing_records() {
+    async fn archive_routes_reject_invalid_or_missing_programs() {
         let (data_dir, app) = empty_app().await;
 
         assert_json_error(&app, "/api/months", StatusCode::BAD_REQUEST).await;
-        assert_json_error(&app, "/api/records?stream=nhk", StatusCode::BAD_REQUEST).await;
-        let response = get(&app, "/api/records?stream=..&month=2020-01").await;
+        assert_json_error(&app, "/api/programs?stream=nhk", StatusCode::BAD_REQUEST).await;
+        let response = get(&app, "/api/programs?stream=..&month=2020-01").await;
         assert_eq!(response.status(), StatusCode::BAD_REQUEST);
 
-        let response = get(&app, "/api/records/nhk/2020-01-01_00-00-00").await;
+        let response = get(&app, "/api/programs/nhk/2020-01-01_00-00-00").await;
         assert_eq!(response.status(), StatusCode::NOT_FOUND);
 
         let response = get(
             &app,
-            "/api/records/nhk/2020-01/2020-01-01_00-00-00.title.jsonl",
+            "/api/programs/nhk/2020-01/2020-01-01_00-00-00.title.jsonl",
         )
         .await;
         assert_eq!(response.status(), StatusCode::NOT_FOUND);
 
         assert_json_error(
             &app,
-            "/api/records/nhk/not-a-timestamp",
+            "/api/programs/nhk/not-a-timestamp",
             StatusCode::BAD_REQUEST,
         )
         .await;
-        assert_json_error(&app, "/api/records/search", StatusCode::BAD_REQUEST).await;
+        assert_json_error(&app, "/api/programs/search", StatusCode::BAD_REQUEST).await;
 
         assert_json_error(&app, "/api/live/%FF", StatusCode::BAD_REQUEST).await;
 
@@ -522,9 +522,9 @@ mod tests {
         for path in [
             "/api/streams",
             "/api/months?stream=nhk",
-            "/api/records?stream=nhk&month=2020-01",
-            "/api/records/search?q=caption",
-            RAW_RECORD_PATH,
+            "/api/programs?stream=nhk&month=2020-01",
+            "/api/programs/search?q=caption",
+            RAW_PROGRAM_PATH,
         ] {
             assert_json_error(&app, path, StatusCode::SERVICE_UNAVAILABLE).await;
         }
@@ -592,7 +592,7 @@ mod tests {
 
     #[tokio::test]
     async fn mcp_route_is_opt_in_and_exposes_read_only_tools() {
-        let (data_dir, disabled_app) = app_with_record().await;
+        let (data_dir, disabled_app) = app_with_program().await;
         let response = mcp_post(
             &disabled_app,
             r#"{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2025-11-25","capabilities":{},"clientInfo":{"name":"test","version":"1.0"}}}"#,
@@ -602,7 +602,7 @@ mod tests {
         assert_eq!(response.status(), StatusCode::NOT_FOUND);
         fs::remove_dir_all(data_dir).unwrap();
 
-        let (data_dir, app) = app_with_record_mcp().await;
+        let (data_dir, app) = app_with_program_mcp().await;
         let response = mcp_post(
             &app,
             r#"{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2025-11-25","capabilities":{},"clientInfo":{"name":"test","version":"1.0"}}}"#,
@@ -634,7 +634,7 @@ mod tests {
         let tools = sse_json(&body_text(response).await);
         let tools = tools["result"]["tools"].as_array().unwrap();
         assert_eq!(tools.len(), 3);
-        for name in ["list_streams", "search_records", "get_record_captions"] {
+        for name in ["list_streams", "search_programs", "get_program_captions"] {
             let tool = tools.iter().find(|tool| tool["name"] == name).unwrap();
             assert_eq!(tool["annotations"]["readOnlyHint"], true);
             assert_eq!(tool["annotations"]["idempotentHint"], true);
@@ -651,7 +651,7 @@ mod tests {
 
         let response = mcp_post(
             &app,
-            r#"{"jsonrpc":"2.0","id":4,"method":"tools/call","params":{"name":"search_records","arguments":{"q":"caption"}}}"#,
+            r#"{"jsonrpc":"2.0","id":4,"method":"tools/call","params":{"name":"search_programs","arguments":{"q":"caption"}}}"#,
             Some(&session_id),
         )
         .await;
@@ -663,7 +663,7 @@ mod tests {
 
         let response = mcp_post(
             &app,
-            r#"{"jsonrpc":"2.0","id":5,"method":"tools/call","params":{"name":"get_record_captions","arguments":{"stream":"nhk","recording_started_at":"2020-01-01_00-00-00","limit":1}}}"#,
+            r#"{"jsonrpc":"2.0","id":5,"method":"tools/call","params":{"name":"get_program_captions","arguments":{"stream":"nhk","recording_started_at":"2020-01-01_00-00-00","limit":1}}}"#,
             Some(&session_id),
         )
         .await;
@@ -731,42 +731,42 @@ mod tests {
         (data_dir, app)
     }
 
-    async fn app_with_record() -> (PathBuf, Router) {
-        app_with_record_options(false).await
+    async fn app_with_program() -> (PathBuf, Router) {
+        app_with_program_options(false).await
     }
 
-    async fn app_with_record_mcp() -> (PathBuf, Router) {
-        app_with_record_options(true).await
+    async fn app_with_program_mcp() -> (PathBuf, Router) {
+        app_with_program_options(true).await
     }
 
-    async fn app_with_records_mcp() -> (PathBuf, Router) {
-        app_with_record_options_and_second_stream(true, true).await
+    async fn app_with_programs_mcp() -> (PathBuf, Router) {
+        app_with_program_options_and_second_stream(true, true).await
     }
 
-    async fn app_with_record_options(mcp_enabled: bool) -> (PathBuf, Router) {
-        app_with_record_options_and_second_stream(mcp_enabled, false).await
+    async fn app_with_program_options(mcp_enabled: bool) -> (PathBuf, Router) {
+        app_with_program_options_and_second_stream(mcp_enabled, false).await
     }
 
-    async fn app_with_record_options_and_second_stream(
+    async fn app_with_program_options_and_second_stream(
         mcp_enabled: bool,
         include_second_stream: bool,
     ) -> (PathBuf, Router) {
         let data_dir = temp_dir();
-        let record_dir = archive::records_root(&data_dir).join("nhk").join("2020-01");
-        fs::create_dir_all(&record_dir).unwrap();
-        fs::write(record_dir.join(RECORD_FILENAME), RECORD_BODY).unwrap();
+        let month_dir = archive::archive_root(&data_dir).join("nhk").join("2020-01");
+        fs::create_dir_all(&month_dir).unwrap();
+        fs::write(month_dir.join(ARCHIVE_FILE_NAME), ARCHIVE_FILE_BODY).unwrap();
         if include_second_stream {
-            let other_record_dir = archive::records_root(&data_dir).join("bs").join("2020-01");
-            fs::create_dir_all(&other_record_dir).unwrap();
+            let other_month_dir = archive::archive_root(&data_dir).join("bs").join("2020-01");
+            fs::create_dir_all(&other_month_dir).unwrap();
             fs::write(
-                other_record_dir.join(OTHER_RECORD_FILENAME),
-                OTHER_RECORD_BODY,
+                other_month_dir.join(OTHER_ARCHIVE_FILE_NAME),
+                OTHER_ARCHIVE_FILE_BODY,
             )
             .unwrap();
         }
         let db_path = search_db::search_db_path(&data_dir);
         let mut connection = search_db::open_and_migrate(&db_path).await.unwrap();
-        search_db::ingest_once(&mut connection, &archive::records_root(&data_dir))
+        search_db::ingest_once(&mut connection, &archive::archive_root(&data_dir))
             .await
             .unwrap();
         drop(connection);

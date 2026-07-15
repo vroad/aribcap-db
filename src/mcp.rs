@@ -15,14 +15,14 @@ use serde::Deserialize;
 use tokio_util::sync::CancellationToken;
 
 use crate::query_service::{
-    ArchiveQueryService, ListStreamsResponse, QueryServiceError, RecordCaptionsResponse,
+    ArchiveQueryService, ListStreamsResponse, ProgramCaptionsResponse, QueryServiceError,
     SearchRequest, SearchResponse,
 };
 
 const MCP_SESSION_IDLE_TIMEOUT: Duration = Duration::from_secs(60 * 60);
 
 #[derive(Debug, Deserialize, JsonSchema)]
-pub struct GetRecordCaptionsRequest {
+pub struct GetProgramCaptionsRequest {
     /// Archive stream name.
     pub stream: String,
     /// Recording start timestamp from a search result, in YYYY-MM-DD_HH-MM-SS form.
@@ -76,7 +76,7 @@ impl AribcapMcp {
             open_world_hint = false
         )
     )]
-    async fn search_records(
+    async fn search_programs(
         &self,
         Parameters(query): Parameters<SearchRequest>,
     ) -> Result<Json<SearchResponse>, String> {
@@ -96,12 +96,12 @@ impl AribcapMcp {
             open_world_hint = false
         )
     )]
-    async fn get_record_captions(
+    async fn get_program_captions(
         &self,
-        Parameters(request): Parameters<GetRecordCaptionsRequest>,
-    ) -> Result<Json<RecordCaptionsResponse>, String> {
+        Parameters(request): Parameters<GetProgramCaptionsRequest>,
+    ) -> Result<Json<ProgramCaptionsResponse>, String> {
         self.query_service
-            .get_record_captions(
+            .get_program_captions(
                 request.stream,
                 request.recording_started_at,
                 request.start_line,
@@ -121,7 +121,7 @@ impl ServerHandler for AribcapMcp {
                 Implementation::new("aribcap-db", env!("CARGO_PKG_VERSION"))
                     .with_title("aribcap-db archive search")
                     .with_description(
-                        "Read-only search and caption access for aribcap-db archives",
+                        "Read-only search and caption access for the aribcap-db program archive",
                     ),
             )
             .with_instructions(

@@ -12,7 +12,7 @@ use chrono::{DateTime, FixedOffset, NaiveDateTime, TimeZone as _, Utc};
 use serde::Serialize;
 use serde_json::Value;
 
-const RECORDS_DIR: &str = "records";
+const ARCHIVE_DIR: &str = "archive";
 const STARTED_AT_FORMAT: &str = "%Y-%m-%d_%H-%M-%S";
 const STARTED_AT_LEN: usize = 19;
 const JST_OFFSET_SECONDS: i32 = 9 * 60 * 60;
@@ -29,12 +29,12 @@ fn jst_now() -> DateTime<FixedOffset> {
 #[derive(Debug)]
 pub struct ArchiveStore {
     data_dir: PathBuf,
-    active_records: BTreeMap<String, ActiveRecord>,
+    active_archive_files: BTreeMap<String, ActiveArchiveFile>,
     dirty_paths: HashMap<PathBuf, u64>,
 }
 
 #[derive(Debug)]
-struct ActiveRecord {
+struct ActiveArchiveFile {
     program: ProgramKey,
     path: PathBuf,
     file: File,
@@ -63,7 +63,7 @@ pub struct GarbageCollectionDryRun {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
-pub struct RecordEntry {
+pub struct ProgramEntry {
     pub stream: String,
     pub month: String,
     pub filename: String,
@@ -75,7 +75,7 @@ impl ArchiveStore {
     pub fn new(data_dir: impl Into<PathBuf>) -> Self {
         Self {
             data_dir: data_dir.into(),
-            active_records: BTreeMap::new(),
+            active_archive_files: BTreeMap::new(),
             dirty_paths: HashMap::new(),
         }
     }
@@ -98,7 +98,7 @@ impl ArchiveStore {
     }
 
     fn append_active(&mut self, stream_name: &str, line: &str) -> Result<bool> {
-        let Some(active) = self.active_records.get_mut(stream_name) else {
+        let Some(active) = self.active_archive_files.get_mut(stream_name) else {
             return Ok(false);
         };
         active.write_line(line)?;
@@ -113,7 +113,7 @@ impl ArchiveStore {
         program: &ProgramKey,
         line: &str,
     ) -> Result<bool> {
-        let Some(active) = self.active_records.get_mut(stream_name) else {
+        let Some(active) = self.active_archive_files.get_mut(stream_name) else {
             return Ok(false);
         };
         if active.program != *program {
@@ -125,20 +125,20 @@ impl ArchiveStore {
         Ok(true)
     }
 
-    fn replace_active(&mut self, stream_name: String, active: ActiveRecord) {
+    fn replace_active(&mut self, stream_name: String, active: ActiveArchiveFile) {
         self.mark_dirty(active.path.clone());
-        self.active_records.insert(stream_name, active);
+        self.active_archive_files.insert(stream_name, active);
     }
 
     fn active_paths(&self) -> HashSet<PathBuf> {
-        self.active_records
+        self.active_archive_files
             .values()
-            .map(|record| record.path.clone())
+            .map(|archive_file| archive_file.path.clone())
             .collect()
     }
 }
 
-impl ActiveRecord {
+impl ActiveArchiveFile {
     fn write_line(&mut self, line: &str) -> Result<()> {
         writeln!(self.file, "{line}")
             .with_context(|| format!("failed to write {}", self.path.display()))
@@ -155,11 +155,11 @@ pub fn handle_line(
     handle_line_at(store, stream_name, line, jst_now())
 }
 
-/// Closes and removes the active archive for a stream, if one exists.
+/// Closes and removes the active archive file for a stream, if one exists.
 /// Subsequent lines are skipped until `handle_line` receives a present EIT
-/// and opens a new archive.
+/// and opens a new archive file.
 pub fn deactivate_stream(store: &Arc<Mutex<ArchiveStore>>, stream_name: &str) -> Result<()> {
-    lock_store(store)?.active_records.remove(stream_name);
+    lock_store(store)?.active_archive_files.remove(stream_name);
     Ok(())
 }
 
@@ -193,7 +193,7 @@ fn handle_line_at(
         store.data_dir.clone()
     };
 
-    let mut active = open_program_file(&data_dir, stream_name, &program, now)?;
+    let mut active = open_archive_file(&data_dir, stream_name, &program, now)?;
     active.write_line(line)?;
     let path = active.path.clone();
     lock_store(store)?.replace_active(stream_name.to_owned(), active);
@@ -250,23 +250,23 @@ fn event_title(event: &Value) -> Option<String> {
         .map(ToOwned::to_owned)
 }
 
-fn open_program_file(
+fn open_archive_file(
     data_dir: &Path,
     stream_name: &str,
     program: &Program,
     now: DateTime<FixedOffset>,
-) -> Result<ActiveRecord> {
+) -> Result<ActiveArchiveFile> {
     let stream = safe_component(stream_name, "stream");
     let month = now.format("%Y-%m").to_string();
     let started_at = now.format(STARTED_AT_FORMAT);
     let title = safe_component(&truncate_utf8_bytes(&program.title, 200), "no-title");
     let filename_stem = format!("{started_at}.{title}");
-    let directory = records_root(data_dir).join(stream).join(month);
+    let directory = archive_root(data_dir).join(stream).join(month);
     fs::create_dir_all(&directory)
         .with_context(|| format!("failed to create {}", directory.display()))?;
 
     // A restarted process can record the same program in the same second.
-    // Keep both captures rather than overwriting a previous archive.
+    // Keep both captures rather than overwriting a previous archive file.
     for suffix in 0_u32.. {
         let collision_suffix = if suffix == 0 {
             String::new()
@@ -277,7 +277,7 @@ fn open_program_file(
         let path = directory.join(filename);
         match OpenOptions::new().create_new(true).write(true).open(&path) {
             Ok(file) => {
-                return Ok(ActiveRecord {
+                return Ok(ActiveArchiveFile {
                     program: program.key.clone(),
                     path,
                     file,
@@ -312,25 +312,25 @@ fn truncate_utf8_bytes(input: &str, max_bytes: usize) -> String {
     input[..end].to_owned()
 }
 
-pub fn records_root(data_dir: &Path) -> PathBuf {
-    data_dir.join(RECORDS_DIR)
+pub fn archive_root(data_dir: &Path) -> PathBuf {
+    data_dir.join(ARCHIVE_DIR)
 }
 
 pub fn list_streams(data_dir: &Path) -> io::Result<Vec<String>> {
-    read_dir_names(&records_root(data_dir), |entry| {
+    read_dir_names(&archive_root(data_dir), |entry| {
         entry.file_type().is_ok_and(|file_type| file_type.is_dir())
     })
 }
 
 pub fn list_months(data_dir: &Path, stream: &str) -> io::Result<Vec<String>> {
     validate_stream_component(stream)?;
-    read_dir_names(&records_root(data_dir).join(stream), |entry| {
+    read_dir_names(&archive_root(data_dir).join(stream), |entry| {
         entry.file_type().is_ok_and(|file_type| file_type.is_dir())
             && is_month_component(&entry.file_name().to_string_lossy())
     })
 }
 
-pub fn resolve_record_path(
+pub fn resolve_archive_file_path(
     data_dir: &Path,
     stream: &str,
     month: &str,
@@ -344,7 +344,7 @@ pub fn resolve_record_path(
         return Ok(None);
     }
 
-    let path = records_root(data_dir)
+    let path = archive_root(data_dir)
         .join(stream)
         .join(month)
         .join(filename);
@@ -468,7 +468,7 @@ fn visit_expired_files(
         (store.data_dir.clone(), store.active_paths())
     };
     let mut eligible = 0;
-    let root = records_root(&data_dir);
+    let root = archive_root(&data_dir);
     let Ok(streams) = fs::read_dir(&root) else {
         return Ok(eligible);
     };
@@ -501,7 +501,7 @@ fn visit_expired_files(
 }
 
 fn remove_empty_month_directories(data_dir: &Path) -> Result<()> {
-    let root = records_root(data_dir);
+    let root = archive_root(data_dir);
     let Ok(streams) = fs::read_dir(&root) else {
         return Ok(());
     };
@@ -578,7 +578,7 @@ mod tests {
 
     #[test]
     fn clearing_dirty_path_preserves_a_newer_generation() {
-        let path = PathBuf::from("record.jsonl");
+        let path = PathBuf::from("archive.jsonl");
         let mut store = ArchiveStore::new("data");
         store.mark_dirty(path.clone());
         let first_generation = store.snapshot_dirty_paths()[&path];
@@ -610,7 +610,7 @@ mod tests {
             std::process::id()
         ));
         let _ = fs::remove_dir_all(&data_dir);
-        let directory = records_root(&data_dir).join("nhk").join("2000-01");
+        let directory = archive_root(&data_dir).join("nhk").join("2000-01");
         fs::create_dir_all(&directory).unwrap();
         let expired = directory.join("2000-01-01_00-00-00.news.jsonl");
         fs::write(&expired, "{}\n").unwrap();
@@ -638,7 +638,7 @@ mod tests {
             .unwrap()
             .unwrap();
         let ArchiveEvent::ProgramStarted(path) = started else {
-            panic!("expected a new archive")
+            panic!("expected a new archive file")
         };
         let retention = Duration::from_secs(24 * 60 * 60);
 
@@ -659,7 +659,7 @@ mod tests {
             std::process::id()
         ));
         let _ = fs::remove_dir_all(&data_dir);
-        let stream_directory = records_root(&data_dir).join("nhk");
+        let stream_directory = archive_root(&data_dir).join("nhk");
         let month_directory = stream_directory.join("2000-01");
         fs::create_dir_all(&month_directory).unwrap();
         fs::write(
@@ -702,14 +702,14 @@ mod tests {
 
         assert_eq!(result, Some(ArchiveEvent::SkippedNoProgram));
         let ArchiveEvent::ProgramStarted(path) = started else {
-            panic!("expected a new archive")
+            panic!("expected a new archive file")
         };
         assert_eq!(fs::read_to_string(path).unwrap(), format!("{eit}\n"));
         fs::remove_dir_all(data_dir).unwrap();
     }
 
     #[test]
-    fn records_lines_after_present_eit_in_one_program_file() {
+    fn records_lines_after_present_eit_in_one_archive_file() {
         let data_dir =
             std::env::temp_dir().join(format!("aribcap-archive-test-{}", std::process::id()));
         let _ = fs::remove_dir_all(&data_dir);
@@ -725,7 +725,7 @@ mod tests {
         handle_line_at(&store, "nhk", r#"{"type":"caption","text":"after"}"#, now).unwrap();
 
         let ArchiveEvent::ProgramStarted(path) = started.unwrap() else {
-            panic!("expected a new archive")
+            panic!("expected a new archive file")
         };
         assert_eq!(
             fs::read_to_string(path).unwrap(),
@@ -735,11 +735,11 @@ mod tests {
     }
 
     #[test]
-    fn lists_archive_directories_and_resolves_record_paths() {
+    fn lists_archive_directories_and_resolves_archive_file_paths() {
         let data_dir =
             std::env::temp_dir().join(format!("aribcap-archive-list-test-{}", std::process::id()));
         let _ = fs::remove_dir_all(&data_dir);
-        let directory = records_root(&data_dir).join("nhk").join("2026-07");
+        let directory = archive_root(&data_dir).join("nhk").join("2026-07");
         fs::create_dir_all(&directory).unwrap();
         let filename = "2026-07-14_12-00-00.news#weather.jsonl";
         fs::write(directory.join(filename), "{}\n").unwrap();
@@ -748,22 +748,22 @@ mod tests {
         assert_eq!(list_streams(&data_dir).unwrap(), ["nhk"]);
         assert_eq!(list_months(&data_dir, "nhk").unwrap(), ["2026-07"]);
         assert_eq!(
-            resolve_record_path(&data_dir, "nhk", "2026-07", filename).unwrap(),
+            resolve_archive_file_path(&data_dir, "nhk", "2026-07", filename).unwrap(),
             Some(directory.join(filename))
         );
         assert_eq!(
-            resolve_record_path(&data_dir, "nhk", "2026-07", "missing.jsonl").unwrap(),
+            resolve_archive_file_path(&data_dir, "nhk", "2026-07", "missing.jsonl").unwrap(),
             None
         );
         assert_eq!(
-            resolve_record_path(&data_dir, "nhk", "2026-07", "ignored.txt").unwrap(),
+            resolve_archive_file_path(&data_dir, "nhk", "2026-07", "ignored.txt").unwrap(),
             None
         );
 
         let directory_entry = directory.join("directory.jsonl");
         fs::create_dir(&directory_entry).unwrap();
         assert_eq!(
-            resolve_record_path(&data_dir, "nhk", "2026-07", "directory.jsonl").unwrap(),
+            resolve_archive_file_path(&data_dir, "nhk", "2026-07", "directory.jsonl").unwrap(),
             None
         );
 
@@ -772,7 +772,7 @@ mod tests {
             let symlink_entry = directory.join("symlink.jsonl");
             std::os::unix::fs::symlink(filename, &symlink_entry).unwrap();
             assert_eq!(
-                resolve_record_path(&data_dir, "nhk", "2026-07", "symlink.jsonl").unwrap(),
+                resolve_archive_file_path(&data_dir, "nhk", "2026-07", "symlink.jsonl").unwrap(),
                 None
             );
         }
@@ -789,7 +789,7 @@ mod tests {
             io::ErrorKind::InvalidInput
         );
         assert_eq!(
-            resolve_record_path(&data_dir, "nhk", "2026-07", "../record.jsonl")
+            resolve_archive_file_path(&data_dir, "nhk", "2026-07", "../archive.jsonl")
                 .unwrap_err()
                 .kind(),
             io::ErrorKind::InvalidInput
