@@ -34,9 +34,9 @@ pub async fn run(args: ServeArgs) -> Result<()> {
     let config = Config::load(&args.config)?;
     let targets = config.resolve_all_streams()?;
     let client = config.build_http_client()?;
-    let data_dir = resolve_data_dir(&args, config.serve.as_ref())?;
-    let listen = resolve_listen(&args, config.serve.as_ref())?;
-    let retention = resolve_retention(&args, config.serve.as_ref())?;
+    let data_dir = resolve_data_dir(config.serve.as_ref())?;
+    let listen = resolve_listen(config.serve.as_ref())?;
+    let retention = resolve_retention(config.serve.as_ref())?;
     let mcp_enabled = config.serve.as_ref().is_some_and(|serve| serve.mcp);
     archive::validate_retention(retention)?;
     std::fs::create_dir_all(archive::archive_root(&data_dir)).with_context(|| {
@@ -438,17 +438,13 @@ fn requested(shutdown: &watch::Receiver<bool>) -> bool {
     *shutdown.borrow()
 }
 
-fn resolve_data_dir(args: &ServeArgs, serve: Option<&ServeConfig>) -> Result<PathBuf> {
-    args.data_dir
-        .clone()
-        .or_else(|| serve.and_then(|serve| serve.data_dir.clone()))
-        .context("set --data-dir or [serve].data_dir")
+fn resolve_data_dir(serve: Option<&ServeConfig>) -> Result<PathBuf> {
+    serve
+        .and_then(|serve| serve.data_dir.clone())
+        .context("set [serve].data_dir in the config file")
 }
 
-fn resolve_listen(args: &ServeArgs, serve: Option<&ServeConfig>) -> Result<SocketAddr> {
-    if let Some(listen) = args.listen {
-        return Ok(listen);
-    }
+fn resolve_listen(serve: Option<&ServeConfig>) -> Result<SocketAddr> {
     serve
         .and_then(|serve| serve.listen.as_deref())
         .unwrap_or(DEFAULT_LISTEN)
@@ -456,12 +452,10 @@ fn resolve_listen(args: &ServeArgs, serve: Option<&ServeConfig>) -> Result<Socke
         .context("invalid listen address")
 }
 
-fn resolve_retention(args: &ServeArgs, serve: Option<&ServeConfig>) -> Result<Duration> {
-    let value = args
-        .retention
-        .as_deref()
-        .or_else(|| serve.and_then(|serve| serve.retention.as_deref()))
-        .context("set --retention or [serve].retention")?;
+fn resolve_retention(serve: Option<&ServeConfig>) -> Result<Duration> {
+    let value = serve
+        .and_then(|serve| serve.retention.as_deref())
+        .context("set [serve].retention in the config file")?;
     humantime::parse_duration(value).context("invalid retention duration")
 }
 
@@ -531,20 +525,8 @@ mod tests {
 
     use super::*;
 
-    fn serve_args(listen: Option<SocketAddr>) -> ServeArgs {
-        ServeArgs {
-            config: PathBuf::from("config.toml"),
-            data_dir: None,
-            listen,
-            retention: None,
-            log_level: "info".to_owned(),
-        }
-    }
-
     #[test]
-    fn listen_uses_cli_then_config_then_default() {
-        let cli_listen = "127.0.0.1:40800".parse().unwrap();
-        let args = serve_args(Some(cli_listen));
+    fn listen_uses_config_then_default() {
         let config = ServeConfig {
             data_dir: None,
             listen: Some("0.0.0.0:40801".to_owned()),
@@ -552,13 +534,12 @@ mod tests {
             mcp: false,
         };
 
-        assert_eq!(resolve_listen(&args, Some(&config)).unwrap(), cli_listen);
         assert_eq!(
-            resolve_listen(&serve_args(None), Some(&config)).unwrap(),
+            resolve_listen(Some(&config)).unwrap(),
             "0.0.0.0:40801".parse().unwrap()
         );
         assert_eq!(
-            resolve_listen(&serve_args(None), None).unwrap(),
+            resolve_listen(None).unwrap(),
             DEFAULT_LISTEN.parse().unwrap()
         );
     }
@@ -573,9 +554,7 @@ mod tests {
         };
 
         assert_eq!(
-            resolve_listen(&serve_args(None), Some(&config))
-                .unwrap_err()
-                .to_string(),
+            resolve_listen(Some(&config)).unwrap_err().to_string(),
             "invalid listen address"
         );
     }

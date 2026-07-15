@@ -12,14 +12,13 @@ cargo run --bin aribcap-db -- serve --config ./config.toml
 ```
 
 Set `data_dir`, `listen`, `retention`, and the optional MCP switch in the
-`[serve]` section, or override the first three on the command line:
+`[serve]` section:
 
-```sh
-aribcap-db serve \
-  --config ./config.toml \
-  --data-dir ./aribcap-db-data \
-  --listen 127.0.0.1:40773 \
-  --retention 30d
+```toml
+[serve]
+data_dir = "./aribcap-db-data"
+listen = "127.0.0.1:40773"
+retention = "30d"
 ```
 
 The HTTP server listens on `127.0.0.1:40773` when `listen` is omitted.
@@ -87,7 +86,7 @@ To rebuild the index from all archive files in the program archive, stop
 `aribcap-db serve` for that data directory and run:
 
 ```sh
-aribcap-db search-rebuild --data-dir ./aribcap-db-data
+aribcap-db search-rebuild --config ./config.toml
 ```
 
 Rebuild deletes and recreates the SQLite database; it does not modify archive

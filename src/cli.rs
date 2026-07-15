@@ -1,4 +1,4 @@
-use std::{net::SocketAddr, path::PathBuf};
+use std::path::PathBuf;
 
 use clap::{Parser, Subcommand, ValueEnum};
 
@@ -89,27 +89,6 @@ pub struct ServeArgs {
 
     #[arg(
         long,
-        value_name = "PATH",
-        help = "Directory for the JSONL program archive"
-    )]
-    pub data_dir: Option<PathBuf>,
-
-    #[arg(
-        long,
-        value_name = "ADDR",
-        help = "HTTP listen address, for example 127.0.0.1:40773"
-    )]
-    pub listen: Option<SocketAddr>,
-
-    #[arg(
-        long,
-        value_name = "DURATION",
-        help = "How long to keep archived JSONL files, for example 30d"
-    )]
-    pub retention: Option<String>,
-
-    #[arg(
-        long,
         default_value = "info",
         value_name = "FILTER",
         help = "tracing-subscriber EnvFilter, for example info or aribcap_db=debug"
@@ -119,12 +98,8 @@ pub struct ServeArgs {
 
 #[derive(Debug, Parser)]
 pub struct SearchRebuildArgs {
-    #[arg(
-        long,
-        value_name = "PATH",
-        help = "Directory for the JSONL program archive"
-    )]
-    pub data_dir: PathBuf,
+    #[arg(long, value_name = "PATH", help = "Path to the TOML config file")]
+    pub config: PathBuf,
 }
 
 #[cfg(test)]
@@ -137,31 +112,24 @@ mod tests {
 
     #[test]
     fn serve_accepts_config() {
-        let args = DbArgs::try_parse_from([
-            "aribcap-db",
-            "serve",
-            "--config",
-            "config.toml",
-            "--listen",
-            "127.0.0.1:40800",
-        ])
-        .unwrap();
+        let args =
+            DbArgs::try_parse_from(["aribcap-db", "serve", "--config", "config.toml"]).unwrap();
 
         let DbCommand::Serve(args) = args.command else {
             panic!("expected DbCommand::Serve");
         };
         assert_eq!(args.config, PathBuf::from("config.toml"));
-        assert_eq!(args.listen.unwrap().to_string(), "127.0.0.1:40800");
     }
 
     #[test]
-    fn search_rebuild_accepts_data_dir() {
+    fn search_rebuild_accepts_config() {
         let args =
-            DbArgs::try_parse_from(["aribcap-db", "search-rebuild", "--data-dir", "data"]).unwrap();
+            DbArgs::try_parse_from(["aribcap-db", "search-rebuild", "--config", "config.toml"])
+                .unwrap();
 
         let DbCommand::SearchRebuild(args) = args.command else {
             panic!("expected DbCommand::SearchRebuild");
         };
-        assert_eq!(args.data_dir, PathBuf::from("data"));
+        assert_eq!(args.config, PathBuf::from("config.toml"));
     }
 }
