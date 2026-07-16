@@ -79,7 +79,7 @@ Use one of the following query forms:
 Search expressions support `AND` and `OR`. The following parameters further
 control the results:
 
-- `stream` restricts results to one stream.
+- `stream` restricts results to one stream. If omitted, all streams are searched.
 - `from` and `to` restrict results by recording time.
 - `genre` accepts `0..15` or `0..15:0..15`.
 - `limit` controls the number of programs and is clamped to `1..200`.

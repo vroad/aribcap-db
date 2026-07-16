@@ -21,17 +21,20 @@ use axum::{
 };
 use futures_util::stream::unfold;
 use serde::{Deserialize, Serialize};
-use sqlx::SqlitePool;
 use tokio::sync::{broadcast, watch};
-use tokio_util::io::ReaderStream;
+use tokio_util::{io::ReaderStream, sync::CancellationToken};
 use tower_http::trace::TraceLayer;
 
-use crate::{archive, live::LiveBroadcaster, search_db};
+use crate::{
+    archive,
+    live::LiveBroadcaster,
+    mcp,
+    query_service::{ArchiveQueryService, QueryServiceError, SearchRequest},
+};
 
 #[derive(Clone)]
 struct AppState {
-    data_dir: Arc<PathBuf>,
-    search_pool: SqlitePool,
+    query_service: ArchiveQueryService,
     live: Arc<LiveBroadcaster>,
     shutdown: watch::Receiver<bool>,
 }
@@ -42,7 +45,10 @@ pub fn router(
     live: Arc<LiveBroadcaster>,
     search_db_ready: Arc<AtomicBool>,
     shutdown: watch::Receiver<bool>,
+    mcp_enabled: bool,
+    mcp_cancellation: CancellationToken,
 ) -> Router {
+    let query_service = ArchiveQueryService::new(data_dir, search_db_path, search_db_ready.clone());
     let archive_routes = Router::new()
         .route("/api/streams", get(api_streams))
         .route("/api/months", get(api_months))
@@ -56,16 +62,21 @@ pub fn router(
             require_search_db(search_db_ready.clone(), request, next)
         }));
 
-    Router::new()
+    let app = Router::new()
         .merge(archive_routes)
         .route("/api/live/{stream}", get(live_stream))
-        .layer(TraceLayer::new_for_http())
         .with_state(AppState {
-            data_dir: Arc::new(data_dir),
-            search_pool: search_db::open_reader_pool(&search_db_path),
+            query_service: query_service.clone(),
             live,
             shutdown,
-        })
+        });
+    let app = if mcp_enabled {
+        app.merge(mcp::router(query_service, mcp_cancellation))
+    } else {
+        app
+    };
+
+    app.layer(TraceLayer::new_for_http())
 }
 
 async fn require_search_db(
@@ -74,16 +85,22 @@ async fn require_search_db(
     next: Next,
 ) -> Response {
     if !search_db_ready.load(Ordering::Acquire) {
-        return HttpError::service_unavailable("search database is not ready").into_response();
+        return HttpError {
+            status: StatusCode::SERVICE_UNAVAILABLE,
+            message: "search database is not ready".to_owned(),
+        }
+        .into_response();
     }
     next.run(request).await
 }
 
 async fn api_streams(State(state): State<AppState>) -> Result<Json<Vec<String>>, HttpError> {
-    let data_dir = state.data_dir.clone();
-    blocking_io(move || archive::list_streams(&data_dir))
+    state
+        .query_service
+        .list_streams()
         .await
         .map(Json)
+        .map_err(Into::into)
 }
 
 async fn api_months(
@@ -91,10 +108,12 @@ async fn api_months(
     query: Result<Query<StreamQuery>, QueryRejection>,
 ) -> Result<Json<Vec<String>>, HttpError> {
     let Query(query) = query?;
-    let data_dir = state.data_dir.clone();
-    blocking_io(move || archive::list_months(&data_dir, &query.stream))
+    state
+        .query_service
+        .list_months(query.stream)
         .await
         .map(Json)
+        .map_err(Into::into)
 }
 
 async fn api_records(
@@ -102,213 +121,25 @@ async fn api_records(
     query: Result<Query<RecordsQuery>, QueryRejection>,
 ) -> Result<Json<Vec<archive::RecordEntry>>, HttpError> {
     let Query(query) = query?;
-    archive::validate_stream_component(&query.stream).map_err(HttpError::from_io)?;
-    archive::validate_month_component(&query.month).map_err(HttpError::from_io)?;
-    let mut connection = state
-        .search_pool
-        .acquire()
+    state
+        .query_service
+        .list_records(query.stream, query.month)
         .await
-        .map_err(HttpError::internal)?;
-    let records = search_db::list_indexed_records(&mut connection, &query.stream, &query.month)
-        .await
-        .map_err(HttpError::internal)?
-        .into_iter()
-        .map(|record| archive::RecordEntry {
-            path: record_api_path(&record.stream, &record.recording_started_at),
-            stream: record.stream,
-            month: record.month,
-            filename: record.filename,
-            size_bytes: u64::try_from(record.size_bytes).unwrap_or(0),
-        })
-        .collect();
-    Ok(Json(records))
-}
-
-const DEFAULT_SEARCH_LIMIT: i64 = 20;
-const MAX_SEARCH_LIMIT: i64 = 200;
-const DEFAULT_INNER_HITS: i64 = 5;
-const MAX_INNER_HITS: i64 = 50;
-
-#[derive(Debug, Deserialize)]
-struct SearchQuery {
-    q: Option<String>,
-    program_q: Option<String>,
-    line_q: Option<String>,
-    genre: Option<String>,
-    stream: Option<String>,
-    from: Option<String>,
-    to: Option<String>,
-    limit: Option<i64>,
-    inner_hits: Option<i64>,
-}
-
-enum SearchMode {
-    General(search_db::SearchExpression),
-    Program(search_db::SearchExpression),
-    Line(search_db::SearchExpression),
-    Combined(search_db::SearchExpression, search_db::SearchExpression),
-}
-
-impl SearchMode {
-    fn resolve(query: &SearchQuery) -> Result<Self, String> {
-        let q = non_empty(query.q.as_deref());
-        let program_q = non_empty(query.program_q.as_deref());
-        let line_q = non_empty(query.line_q.as_deref());
-        let parse = |value: &str| search_db::parse_search_expression(value).map_err(str::to_owned);
-
-        match (q, program_q, line_q) {
-            (Some(_), Some(_), _) | (Some(_), _, Some(_)) => {
-                Err("combine `q` with `program_q`/`line_q` is not supported".to_owned())
-            }
-            (Some(q), None, None) => Ok(Self::General(parse(q)?)),
-            (None, Some(program_q), None) => Ok(Self::Program(parse(program_q)?)),
-            (None, None, Some(line_q)) => Ok(Self::Line(parse(line_q)?)),
-            (None, Some(program_q), Some(line_q)) => {
-                Ok(Self::Combined(parse(program_q)?, parse(line_q)?))
-            }
-            (None, None, None) => Err("provide one of `q`, `program_q`, or `line_q`".to_owned()),
-        }
-    }
-}
-
-fn non_empty(value: Option<&str>) -> Option<&str> {
-    value.map(str::trim).filter(|value| !value.is_empty())
-}
-
-fn parse_genre_filter(value: Option<&str>) -> Result<Option<search_db::GenreFilter>, String> {
-    let Some(value) = non_empty(value) else {
-        return Ok(None);
-    };
-    let (level1, level2) = match value.split_once(':') {
-        Some((level1, level2)) => (level1, Some(level2)),
-        None => (value, None),
-    };
-    let parse_nibble = |value: &str| {
-        value
-            .parse::<i64>()
-            .ok()
-            .filter(|value| (0..=15).contains(value))
-            .ok_or_else(|| "genre must be `0..15` or `0..15:0..15`".to_owned())
-    };
-
-    Ok(Some(search_db::GenreFilter {
-        level1: parse_nibble(level1)?,
-        level2: level2.map(parse_nibble).transpose()?,
-    }))
-}
-
-#[derive(Debug, Serialize)]
-struct SearchResponse {
-    items: Vec<SearchResultItem>,
-}
-
-#[derive(Debug, Serialize)]
-struct SearchResultItem {
-    #[serde(rename = "programId")]
-    program_id: i64,
-    stream: String,
-    #[serde(rename = "recordingStartedAt")]
-    recording_started_at: String,
-    #[serde(rename = "startTime")]
-    start_time: Option<String>,
-    title: String,
-    description: String,
-    path: String,
-    hits: Vec<SearchHitItem>,
-}
-
-#[derive(Debug, Serialize)]
-struct SearchHitItem {
-    #[serde(rename = "lineId")]
-    line_id: i64,
-    #[serde(rename = "lineNo")]
-    line_no: i64,
-    time: Option<String>,
-    text: String,
+        .map(Json)
+        .map_err(Into::into)
 }
 
 async fn api_search(
     State(state): State<AppState>,
-    query: Result<Query<SearchQuery>, QueryRejection>,
-) -> Result<Json<SearchResponse>, HttpError> {
+    query: Result<Query<SearchRequest>, QueryRejection>,
+) -> Result<Json<crate::query_service::SearchResponse>, HttpError> {
     let Query(query) = query?;
-    let limit = query
-        .limit
-        .unwrap_or(DEFAULT_SEARCH_LIMIT)
-        .clamp(1, MAX_SEARCH_LIMIT);
-    let inner_hits = query
-        .inner_hits
-        .unwrap_or(DEFAULT_INNER_HITS)
-        .clamp(1, MAX_INNER_HITS);
-    let stream = non_empty(query.stream.as_deref()).map(str::to_owned);
-    if let Some(stream) = &stream {
-        archive::validate_stream_component(stream).map_err(HttpError::from_io)?;
-    }
-    let from = non_empty(query.from.as_deref()).map(search_db::expand_from_bound);
-    let to = non_empty(query.to.as_deref()).map(search_db::expand_to_bound);
-    let genre = parse_genre_filter(query.genre.as_deref()).map_err(HttpError::bad_request)?;
-    let mode = SearchMode::resolve(&query).map_err(HttpError::bad_request)?;
-
-    let mut connection = state
-        .search_pool
-        .acquire()
+    state
+        .query_service
+        .search(query)
         .await
-        .map_err(HttpError::internal)?;
-    let filter = search_db::SearchFilter {
-        stream: stream.as_deref(),
-        from: from.as_deref(),
-        to: to.as_deref(),
-        genre,
-    };
-    let programs = match mode {
-        SearchMode::General(expression) => {
-            search_db::search_general(&mut connection, &expression, &filter, limit, inner_hits)
-                .await
-        }
-        SearchMode::Program(expression) => {
-            search_db::search_programs(&mut connection, &expression, &filter, limit).await
-        }
-        SearchMode::Line(expression) => {
-            search_db::search_captions(&mut connection, &expression, &filter, limit, inner_hits)
-                .await
-        }
-        SearchMode::Combined(program_expression, line_expression) => {
-            search_db::search_combined(
-                &mut connection,
-                &program_expression,
-                &line_expression,
-                &filter,
-                limit,
-                inner_hits,
-            )
-            .await
-        }
-    }
-    .map_err(HttpError::internal)?;
-
-    let items = programs
-        .into_iter()
-        .map(|program| SearchResultItem {
-            program_id: program.program_id,
-            path: record_api_path(&program.stream, &program.recording_started_at),
-            stream: program.stream,
-            recording_started_at: program.recording_started_at,
-            start_time: program.start_time,
-            title: program.title,
-            description: program.description,
-            hits: program
-                .hits
-                .into_iter()
-                .map(|hit| SearchHitItem {
-                    line_id: hit.line_id,
-                    line_no: hit.line_no,
-                    time: hit.time,
-                    text: hit.text,
-                })
-                .collect(),
-        })
-        .collect();
-    Ok(Json(SearchResponse { items }))
+        .map(Json)
+        .map_err(Into::into)
 }
 
 async fn raw_record(
@@ -316,42 +147,16 @@ async fn raw_record(
     path: Result<Path<(String, String)>, PathRejection>,
 ) -> Result<Response, HttpError> {
     let Path((stream, recording_started_at)) = path?;
-    archive::validate_stream_component(&stream).map_err(HttpError::from_io)?;
-    archive::validate_recording_started_at(&recording_started_at).map_err(HttpError::from_io)?;
-    let mut connection = state
-        .search_pool
-        .acquire()
-        .await
-        .map_err(HttpError::internal)?;
-    let Some(record) =
-        search_db::find_indexed_record(&mut connection, &stream, &recording_started_at)
-            .await
-            .map_err(HttpError::internal)?
-    else {
-        return Err(HttpError::not_found("record not found"));
-    };
-    let data_dir = state.data_dir.clone();
-    let Some(path) = blocking_io(move || {
-        archive::resolve_record_path(&data_dir, &record.stream, &record.month, &record.filename)
-    })
-    .await?
-    else {
-        return Err(HttpError::not_found("record not found"));
-    };
+    let path = state
+        .query_service
+        .resolve_record_path(stream, recording_started_at)
+        .await?;
 
     let file = tokio::fs::File::open(path)
         .await
-        .map_err(HttpError::from_io)?;
+        .map_err(QueryServiceError::from)?;
     let body = Body::from_stream(ReaderStream::new(file));
     Ok(([(header::CONTENT_TYPE, "application/x-ndjson")], body).into_response())
-}
-
-fn record_api_path(stream: &str, recording_started_at: &str) -> String {
-    format!(
-        "/api/records/{}/{}",
-        urlencoding::encode(stream),
-        urlencoding::encode(recording_started_at)
-    )
 }
 
 async fn live_stream(
@@ -406,18 +211,6 @@ async fn live_stream(
         .into_response())
 }
 
-async fn blocking_io<T>(
-    operation: impl FnOnce() -> io::Result<T> + Send + 'static,
-) -> Result<T, HttpError>
-where
-    T: Send + 'static,
-{
-    tokio::task::spawn_blocking(operation)
-        .await
-        .map_err(HttpError::internal)?
-        .map_err(HttpError::from_io)
-}
-
 #[derive(Debug, Deserialize)]
 struct StreamQuery {
     stream: String,
@@ -441,43 +234,25 @@ struct HttpError {
 }
 
 impl HttpError {
-    fn from_io(error: io::Error) -> Self {
-        let status = match error.kind() {
-            io::ErrorKind::InvalidInput => StatusCode::BAD_REQUEST,
-            io::ErrorKind::NotFound => StatusCode::NOT_FOUND,
-            _ => StatusCode::INTERNAL_SERVER_ERROR,
-        };
-        Self {
-            status,
-            message: error.to_string(),
-        }
-    }
-
     fn not_found(message: impl Into<String>) -> Self {
         Self {
             status: StatusCode::NOT_FOUND,
             message: message.into(),
         }
     }
+}
 
-    fn bad_request(message: impl Into<String>) -> Self {
+impl From<QueryServiceError> for HttpError {
+    fn from(error: QueryServiceError) -> Self {
+        let status = match &error {
+            QueryServiceError::BadRequest(_) => StatusCode::BAD_REQUEST,
+            QueryServiceError::NotFound(_) => StatusCode::NOT_FOUND,
+            QueryServiceError::Unavailable(_) => StatusCode::SERVICE_UNAVAILABLE,
+            QueryServiceError::Internal(_) => StatusCode::INTERNAL_SERVER_ERROR,
+        };
         Self {
-            status: StatusCode::BAD_REQUEST,
-            message: message.into(),
-        }
-    }
-
-    fn internal(error: impl std::fmt::Display) -> Self {
-        Self {
-            status: StatusCode::INTERNAL_SERVER_ERROR,
+            status,
             message: error.to_string(),
-        }
-    }
-
-    fn service_unavailable(message: impl Into<String>) -> Self {
-        Self {
-            status: StatusCode::SERVICE_UNAVAILABLE,
-            message: message.into(),
         }
     }
 }
@@ -527,10 +302,13 @@ mod tests {
     use tower::ServiceExt as _;
 
     use super::*;
+    use crate::search_db;
 
     static NEXT_TEMP_DIR: AtomicUsize = AtomicUsize::new(0);
     const RECORD_FILENAME: &str = "2020-01-01_00-00-00.title#part.jsonl";
-    const RECORD_BODY: &str = "{\"type\":\"eit\",\"section\":\"present\",\"shortEvents\":[{\"languageCode\":\"jpn\",\"eventName\":\"title\"}]}\n{\"type\":\"caption\",\"text\":\"caption\"}\n";
+    const RECORD_BODY: &str = "{\"type\":\"eit\",\"section\":\"present\",\"startTime\":\"2020-01-01T00:00:00.000+09:00\",\"durationSec\":1800,\"shortEvents\":[{\"languageCode\":\"jpn\",\"eventName\":\"title\"}]}\n{\"type\":\"caption\",\"time\":\"2020-01-01T00:00:01.000+09:00\",\"text\":\"caption\",\"languageCode\":\"jpn\",\"durationMs\":500}\n{\"type\":\"caption\",\"time\":\"2020-01-01T00:00:02.000+09:00\",\"text\":\"second caption\",\"languageCode\":\"jpn\",\"durationMs\":600}\n";
+    const OTHER_RECORD_FILENAME: &str = "2020-01-02_00-00-00.other.jsonl";
+    const OTHER_RECORD_BODY: &str = "{\"type\":\"eit\",\"section\":\"present\",\"startTime\":\"2020-01-02T00:00:00.000+09:00\",\"durationSec\":1800,\"shortEvents\":[{\"languageCode\":\"jpn\",\"eventName\":\"other title\"}]}\n{\"type\":\"caption\",\"time\":\"2020-01-02T00:00:01.000+09:00\",\"text\":\"caption\",\"languageCode\":\"jpn\",\"durationMs\":500}\n";
     const RAW_RECORD_PATH: &str = "/api/records/nhk/2020-01-01_00-00-00";
 
     #[tokio::test]
@@ -565,6 +343,66 @@ mod tests {
         assert_eq!(response.status(), StatusCode::OK);
         let search: serde_json::Value = serde_json::from_str(&body_text(response).await).unwrap();
         assert_eq!(search["items"][0]["path"], RAW_RECORD_PATH);
+
+        fs::remove_dir_all(data_dir).unwrap();
+    }
+
+    #[tokio::test]
+    async fn search_without_stream_covers_all_streams_for_http_and_mcp() {
+        let (data_dir, app) = app_with_records_mcp().await;
+
+        let response = get(&app, "/api/records/search?q=caption").await;
+        assert_eq!(response.status(), StatusCode::OK);
+        let search: serde_json::Value = serde_json::from_str(&body_text(response).await).unwrap();
+        let streams = search["items"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|item| item["stream"].as_str().unwrap())
+            .collect::<Vec<_>>();
+        assert_eq!(streams, ["bs", "nhk"]);
+
+        let response = get(&app, "/api/records/search?q=caption&stream=nhk").await;
+        let search: serde_json::Value = serde_json::from_str(&body_text(response).await).unwrap();
+        assert_eq!(search["items"].as_array().unwrap().len(), 1);
+        assert_eq!(search["items"][0]["stream"], "nhk");
+
+        let response = mcp_post(
+            &app,
+            r#"{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2025-11-25","capabilities":{},"clientInfo":{"name":"test","version":"1.0"}}}"#,
+            None,
+        )
+        .await;
+        let session_id = response.headers()["mcp-session-id"]
+            .to_str()
+            .unwrap()
+            .to_owned();
+        body_text(response).await;
+        assert_eq!(
+            mcp_post(
+                &app,
+                r#"{"jsonrpc":"2.0","method":"notifications/initialized"}"#,
+                Some(&session_id),
+            )
+            .await
+            .status(),
+            StatusCode::ACCEPTED
+        );
+
+        let response = mcp_post(
+            &app,
+            r#"{"jsonrpc":"2.0","id":2,"method":"tools/call","params":{"name":"search_records","arguments":{"q":"caption"}}}"#,
+            Some(&session_id),
+        )
+        .await;
+        let result = sse_json(&body_text(response).await);
+        let streams = result["result"]["structuredContent"]["items"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|item| item["stream"].as_str().unwrap())
+            .collect::<Vec<_>>();
+        assert_eq!(streams, ["bs", "nhk"]);
 
         fs::remove_dir_all(data_dir).unwrap();
     }
@@ -645,6 +483,8 @@ mod tests {
             broadcaster.clone(),
             Arc::new(AtomicBool::new(false)),
             shutdown_rx,
+            false,
+            CancellationToken::new(),
         );
         let response = get(&app, "/api/live/nhk").await;
         assert_eq!(response.status(), StatusCode::OK);
@@ -675,6 +515,8 @@ mod tests {
             Arc::new(LiveBroadcaster::new(["nhk".to_owned()])),
             ready.clone(),
             shutdown,
+            true,
+            CancellationToken::new(),
         );
 
         for path in [
@@ -688,6 +530,57 @@ mod tests {
         }
         assert_eq!(get(&app, "/api/live/nhk").await.status(), StatusCode::OK);
 
+        let response = mcp_post(
+            &app,
+            r#"{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2025-11-25","capabilities":{},"clientInfo":{"name":"test","version":"1.0"}}}"#,
+            None,
+        )
+        .await;
+        assert_eq!(response.status(), StatusCode::OK);
+        let session_id = response.headers()["mcp-session-id"]
+            .to_str()
+            .unwrap()
+            .to_owned();
+        let initialized = sse_json(&body_text(response).await);
+        assert_eq!(initialized["result"]["serverInfo"]["name"], "aribcap-db");
+
+        let response = mcp_post(
+            &app,
+            r#"{"jsonrpc":"2.0","method":"notifications/initialized"}"#,
+            Some(&session_id),
+        )
+        .await;
+        assert_eq!(response.status(), StatusCode::ACCEPTED);
+
+        let response = mcp_post(
+            &app,
+            r#"{"jsonrpc":"2.0","id":2,"method":"tools/list"}"#,
+            Some(&session_id),
+        )
+        .await;
+        assert_eq!(
+            sse_json(&body_text(response).await)["result"]["tools"]
+                .as_array()
+                .unwrap()
+                .len(),
+            3
+        );
+
+        let response = mcp_post(
+            &app,
+            r#"{"jsonrpc":"2.0","id":3,"method":"tools/call","params":{"name":"list_streams","arguments":{}}}"#,
+            Some(&session_id),
+        )
+        .await;
+        let result = sse_json(&body_text(response).await);
+        assert_eq!(result["result"]["isError"], true);
+        assert!(
+            result["result"]["content"][0]["text"]
+                .as_str()
+                .unwrap()
+                .contains("search database is not ready")
+        );
+
         search_db::open_and_migrate(&search_db::search_db_path(&data_dir))
             .await
             .unwrap();
@@ -697,11 +590,124 @@ mod tests {
         fs::remove_dir_all(data_dir).unwrap();
     }
 
+    #[tokio::test]
+    async fn mcp_route_is_opt_in_and_exposes_read_only_tools() {
+        let (data_dir, disabled_app) = app_with_record().await;
+        let response = mcp_post(
+            &disabled_app,
+            r#"{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2025-11-25","capabilities":{},"clientInfo":{"name":"test","version":"1.0"}}}"#,
+            None,
+        )
+        .await;
+        assert_eq!(response.status(), StatusCode::NOT_FOUND);
+        fs::remove_dir_all(data_dir).unwrap();
+
+        let (data_dir, app) = app_with_record_mcp().await;
+        let response = mcp_post(
+            &app,
+            r#"{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2025-11-25","capabilities":{},"clientInfo":{"name":"test","version":"1.0"}}}"#,
+            None,
+        )
+        .await;
+        assert_eq!(response.status(), StatusCode::OK);
+        let session_id = response.headers()["mcp-session-id"]
+            .to_str()
+            .unwrap()
+            .to_owned();
+        let initialized = sse_json(&body_text(response).await);
+        assert!(initialized["result"]["capabilities"]["tools"].is_object());
+
+        let response = mcp_post(
+            &app,
+            r#"{"jsonrpc":"2.0","method":"notifications/initialized"}"#,
+            Some(&session_id),
+        )
+        .await;
+        assert_eq!(response.status(), StatusCode::ACCEPTED);
+
+        let response = mcp_post(
+            &app,
+            r#"{"jsonrpc":"2.0","id":2,"method":"tools/list"}"#,
+            Some(&session_id),
+        )
+        .await;
+        let tools = sse_json(&body_text(response).await);
+        let tools = tools["result"]["tools"].as_array().unwrap();
+        assert_eq!(tools.len(), 3);
+        for name in ["list_streams", "search_records", "get_record_captions"] {
+            let tool = tools.iter().find(|tool| tool["name"] == name).unwrap();
+            assert_eq!(tool["annotations"]["readOnlyHint"], true);
+            assert_eq!(tool["annotations"]["idempotentHint"], true);
+        }
+
+        let response = mcp_post(
+            &app,
+            r#"{"jsonrpc":"2.0","id":3,"method":"tools/call","params":{"name":"list_streams","arguments":{}}}"#,
+            Some(&session_id),
+        )
+        .await;
+        let result = sse_json(&body_text(response).await);
+        assert_eq!(result["result"]["structuredContent"]["streams"][0], "nhk");
+
+        let response = mcp_post(
+            &app,
+            r#"{"jsonrpc":"2.0","id":4,"method":"tools/call","params":{"name":"search_records","arguments":{"q":"caption"}}}"#,
+            Some(&session_id),
+        )
+        .await;
+        let result = sse_json(&body_text(response).await);
+        assert_eq!(
+            result["result"]["structuredContent"]["items"][0]["title"],
+            "title"
+        );
+
+        let response = mcp_post(
+            &app,
+            r#"{"jsonrpc":"2.0","id":5,"method":"tools/call","params":{"name":"get_record_captions","arguments":{"stream":"nhk","recording_started_at":"2020-01-01_00-00-00","limit":1}}}"#,
+            Some(&session_id),
+        )
+        .await;
+        let result = sse_json(&body_text(response).await);
+        let output = &result["result"]["structuredContent"];
+        assert_eq!(output["program"]["title"], "title");
+        assert_eq!(output["captions"][0]["lineNo"], 2);
+        assert_eq!(output["captions"][0]["durationMs"], 500);
+        assert_eq!(output["nextStartLine"], 3);
+
+        fs::remove_dir_all(data_dir).unwrap();
+    }
+
     async fn get(app: &Router, uri: &str) -> Response {
         app.clone()
             .oneshot(Request::builder().uri(uri).body(Body::empty()).unwrap())
             .await
             .unwrap()
+    }
+
+    async fn mcp_post(app: &Router, body: &'static str, session_id: Option<&str>) -> Response {
+        let mut request = Request::builder()
+            .method("POST")
+            .uri("/mcp")
+            .header(header::HOST, "localhost")
+            .header(header::CONTENT_TYPE, "application/json")
+            .header(header::ACCEPT, "application/json, text/event-stream");
+        if let Some(session_id) = session_id {
+            request = request.header("mcp-session-id", session_id);
+        }
+        app.clone()
+            .oneshot(request.body(Body::from(body)).unwrap())
+            .await
+            .unwrap()
+    }
+
+    fn sse_json(body: &str) -> serde_json::Value {
+        body.lines()
+            .filter_map(|line| line.strip_prefix("data:"))
+            .map(str::trim)
+            .filter(|data| !data.is_empty())
+            .filter_map(|data| serde_json::from_str(data).ok())
+            .next_back()
+            .expect("SSE response should contain a JSON data event")
     }
 
     async fn body_text(response: Response) -> String {
@@ -726,17 +732,54 @@ mod tests {
     }
 
     async fn app_with_record() -> (PathBuf, Router) {
+        app_with_record_options(false).await
+    }
+
+    async fn app_with_record_mcp() -> (PathBuf, Router) {
+        app_with_record_options(true).await
+    }
+
+    async fn app_with_records_mcp() -> (PathBuf, Router) {
+        app_with_record_options_and_second_stream(true, true).await
+    }
+
+    async fn app_with_record_options(mcp_enabled: bool) -> (PathBuf, Router) {
+        app_with_record_options_and_second_stream(mcp_enabled, false).await
+    }
+
+    async fn app_with_record_options_and_second_stream(
+        mcp_enabled: bool,
+        include_second_stream: bool,
+    ) -> (PathBuf, Router) {
         let data_dir = temp_dir();
         let record_dir = archive::records_root(&data_dir).join("nhk").join("2020-01");
         fs::create_dir_all(&record_dir).unwrap();
         fs::write(record_dir.join(RECORD_FILENAME), RECORD_BODY).unwrap();
+        if include_second_stream {
+            let other_record_dir = archive::records_root(&data_dir).join("bs").join("2020-01");
+            fs::create_dir_all(&other_record_dir).unwrap();
+            fs::write(
+                other_record_dir.join(OTHER_RECORD_FILENAME),
+                OTHER_RECORD_BODY,
+            )
+            .unwrap();
+        }
         let db_path = search_db::search_db_path(&data_dir);
         let mut connection = search_db::open_and_migrate(&db_path).await.unwrap();
         search_db::ingest_once(&mut connection, &archive::records_root(&data_dir))
             .await
             .unwrap();
         drop(connection);
-        let app = test_router(data_dir.clone(), Arc::new(LiveBroadcaster::new([])));
+        let (_, shutdown) = watch::channel(false);
+        let app = router(
+            data_dir.clone(),
+            search_db::search_db_path(&data_dir),
+            Arc::new(LiveBroadcaster::new([])),
+            Arc::new(AtomicBool::new(true)),
+            shutdown,
+            mcp_enabled,
+            CancellationToken::new(),
+        );
         (data_dir, app)
     }
 
@@ -748,6 +791,8 @@ mod tests {
             live,
             Arc::new(AtomicBool::new(true)),
             shutdown,
+            false,
+            CancellationToken::new(),
         )
     }
 

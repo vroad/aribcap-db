@@ -51,6 +51,34 @@ pub struct IndexedRecord {
     pub size_bytes: i64,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq, FromRow)]
+pub struct ProgramDetails {
+    pub program_id: i64,
+    pub stream: String,
+    pub recording_started_at: String,
+    pub start_time: Option<String>,
+    pub duration_sec: Option<i64>,
+    pub title: String,
+    pub description: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, FromRow)]
+pub struct CaptionLine {
+    pub line_id: i64,
+    pub line_no: i64,
+    pub time: Option<String>,
+    pub text: String,
+    pub duration_ms: Option<i64>,
+    pub language_code: Option<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CaptionPage {
+    pub program: ProgramDetails,
+    pub captions: Vec<CaptionLine>,
+    pub has_more: bool,
+}
+
 #[derive(FromRow)]
 struct GroupedRow {
     program_id: i64,
@@ -405,6 +433,71 @@ pub async fn find_indexed_record(
     .map_err(Into::into)
 }
 
+/// Returns one program and a bounded page of its caption lines.
+pub async fn get_caption_page(
+    conn: &mut SqliteConnection,
+    stream: &str,
+    recording_started_at: &str,
+    start_line: i64,
+    limit: i64,
+) -> Result<Option<CaptionPage>> {
+    anyhow::ensure!(limit > 0, "caption page limit must be greater than zero");
+
+    let program = sqlx::query_as::<_, ProgramDetails>(
+        r#"
+        SELECT
+            id AS program_id,
+            stream,
+            recording_started_at,
+            start_time,
+            duration_sec,
+            title,
+            description
+        FROM programs
+        WHERE stream = ?1 AND recording_started_at = ?2
+        "#,
+    )
+    .bind(stream)
+    .bind(recording_started_at)
+    .fetch_optional(&mut *conn)
+    .await?;
+    let Some(program) = program else {
+        return Ok(None);
+    };
+
+    let mut captions = sqlx::query_as::<_, CaptionLine>(
+        r#"
+        SELECT
+            id AS line_id,
+            line_no,
+            time,
+            text,
+            duration_ms,
+            language_code
+        FROM caption_lines
+        WHERE program_id = ?1 AND line_no >= ?2
+        ORDER BY line_no ASC
+        LIMIT ?3
+        "#,
+    )
+    .bind(program.program_id)
+    .bind(start_line)
+    .bind(limit.saturating_add(1))
+    .fetch_all(&mut *conn)
+    .await?;
+    let limit_usize = usize::try_from(limit).unwrap_or(usize::MAX);
+    let has_more = captions.len() > limit_usize;
+    if has_more {
+        captions.pop();
+    }
+
+    Ok(Some(CaptionPage {
+        program,
+        captions,
+        has_more,
+    }))
+}
+
 #[cfg(test)]
 mod tests {
     use super::super::db::open_and_migrate;
@@ -729,5 +822,54 @@ mod tests {
             .unwrap();
         assert_eq!(results.len(), 1);
         assert!(results[0].hits[0].text.contains("台"));
+    }
+
+    #[tokio::test]
+    async fn caption_page_is_ordered_and_reports_a_next_page() {
+        let mut conn = seed_search_db().await;
+
+        let first = get_caption_page(&mut conn, "nhk", "2026-07-10_19-00-00", 1, 1)
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(first.program.title, "ニュース");
+        assert_eq!(first.captions.len(), 1);
+        assert_eq!(first.captions[0].line_no, 2);
+        assert!(first.has_more);
+
+        let second = get_caption_page(&mut conn, "nhk", "2026-07-10_19-00-00", 3, 10)
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(second.captions.len(), 1);
+        assert_eq!(second.captions[0].line_no, 3);
+        assert!(!second.has_more);
+    }
+
+    #[tokio::test]
+    async fn caption_page_returns_none_for_an_unknown_record() {
+        let mut conn = seed_search_db().await;
+
+        let page = get_caption_page(&mut conn, "nhk", "2026-07-10_00-00-00", 1, 100)
+            .await
+            .unwrap();
+
+        assert!(page.is_none());
+    }
+
+    #[tokio::test]
+    async fn caption_page_rejects_non_positive_limits() {
+        let mut conn = seed_search_db().await;
+
+        for limit in [0, -1] {
+            let error = get_caption_page(&mut conn, "nhk", "2026-07-10_19-00-00", 1, limit)
+                .await
+                .unwrap_err();
+
+            assert_eq!(
+                error.to_string(),
+                "caption page limit must be greater than zero"
+            );
+        }
     }
 }

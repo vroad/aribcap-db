@@ -8,6 +8,7 @@ use std::{
 
 use anyhow::{Context, Result, anyhow};
 use tokio::sync::watch;
+use tokio_util::sync::CancellationToken;
 use tracing_subscriber::EnvFilter;
 
 use crate::{
@@ -36,6 +37,7 @@ pub async fn run(args: ServeArgs) -> Result<()> {
     let data_dir = resolve_data_dir(&args, config.serve.as_ref())?;
     let listen = resolve_listen(&args, config.serve.as_ref())?;
     let retention = resolve_retention(&args, config.serve.as_ref())?;
+    let mcp_enabled = config.serve.as_ref().is_some_and(|serve| serve.mcp);
     archive::validate_retention(retention)?;
     std::fs::create_dir_all(archive::records_root(&data_dir)).with_context(|| {
         format!(
@@ -92,6 +94,7 @@ pub async fn run(args: ServeArgs) -> Result<()> {
     // -------------------------------------------------------------------------
     let search_db_path = search_db::search_db_path(&data_dir);
     let search_db_ready = Arc::new(AtomicBool::new(false));
+    let mcp_cancellation = cancellation_token_on_shutdown(shutdown_rx.clone());
     let (maintenance_shutdown_tx, maintenance_shutdown_rx) = watch::channel(false);
     let mut maintenance_task = tokio::spawn(archive_maintenance_loop(
         search_db_path.clone(),
@@ -107,6 +110,8 @@ pub async fn run(args: ServeArgs) -> Result<()> {
         live_broadcaster,
         search_db_ready.clone(),
         shutdown_rx.clone(),
+        mcp_enabled,
+        mcp_cancellation.clone(),
     );
     // Keep ingest and garbage collection running while HTTP is unavailable. After
     // a bind or serve error, the HTTP task waits 15 seconds and tries to bind and
@@ -418,6 +423,17 @@ async fn wait_for_shutdown(shutdown: &mut watch::Receiver<bool>) {
     }
 }
 
+/// Returns a token that is cancelled when shutdown is requested.
+fn cancellation_token_on_shutdown(mut shutdown: watch::Receiver<bool>) -> CancellationToken {
+    let token = CancellationToken::new();
+    let task_token = token.clone();
+    tokio::spawn(async move {
+        wait_for_shutdown(&mut shutdown).await;
+        task_token.cancel();
+    });
+    token
+}
+
 fn requested(shutdown: &watch::Receiver<bool>) -> bool {
     *shutdown.borrow()
 }
@@ -531,14 +547,15 @@ mod tests {
         let args = serve_args(Some(cli_listen));
         let config = ServeConfig {
             data_dir: None,
-            listen: Some("127.0.0.1:40801".to_owned()),
+            listen: Some("0.0.0.0:40801".to_owned()),
             retention: None,
+            mcp: false,
         };
 
         assert_eq!(resolve_listen(&args, Some(&config)).unwrap(), cli_listen);
         assert_eq!(
             resolve_listen(&serve_args(None), Some(&config)).unwrap(),
-            "127.0.0.1:40801".parse().unwrap()
+            "0.0.0.0:40801".parse().unwrap()
         );
         assert_eq!(
             resolve_listen(&serve_args(None), None).unwrap(),
@@ -552,6 +569,7 @@ mod tests {
             data_dir: None,
             listen: Some("not-an-address".to_owned()),
             retention: None,
+            mcp: false,
         };
 
         assert_eq!(
@@ -587,5 +605,18 @@ mod tests {
         let task = tokio::spawn(std::future::pending());
 
         join_http_with_timeout(task, Duration::ZERO).await;
+    }
+
+    #[tokio::test]
+    async fn cancellation_token_follows_shutdown_watch() {
+        let (shutdown_tx, shutdown_rx) = watch::channel(false);
+        let token = cancellation_token_on_shutdown(shutdown_rx);
+
+        assert!(!token.is_cancelled());
+        shutdown_tx.send(true).unwrap();
+
+        tokio::time::timeout(Duration::from_secs(1), token.cancelled())
+            .await
+            .expect("token should cancel shortly after shutdown is requested");
     }
 }

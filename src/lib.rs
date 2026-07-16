@@ -3,6 +3,8 @@ pub mod cli;
 pub mod config;
 pub mod live;
 pub mod logging;
+pub mod mcp;
+pub mod query_service;
 pub mod render;
 pub mod search_db;
 pub mod serve;

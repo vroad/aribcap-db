@@ -33,6 +33,8 @@ pub struct ServeConfig {
     pub data_dir: Option<PathBuf>,
     pub listen: Option<String>,
     pub retention: Option<String>,
+    #[serde(default)]
+    pub mcp: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -188,6 +190,37 @@ vars.channel = "nhk"
 
         assert_eq!(config.unix_socket, None);
         config.build_http_client().unwrap();
+    }
+
+    #[test]
+    fn mcp_defaults_to_false_and_can_be_enabled() {
+        let disabled: Config = toml::from_str(
+            r#"
+url_template = "http://example.test/{{ channel }}"
+
+[streams.nhk]
+vars.channel = "nhk"
+
+[serve]
+listen = "127.0.0.1:40773"
+"#,
+        )
+        .unwrap();
+        assert!(!disabled.serve.unwrap().mcp);
+
+        let enabled: Config = toml::from_str(
+            r#"
+url_template = "http://example.test/{{ channel }}"
+
+[streams.nhk]
+vars.channel = "nhk"
+
+[serve]
+mcp = true
+"#,
+        )
+        .unwrap();
+        assert!(enabled.serve.unwrap().mcp);
     }
 
     #[test]

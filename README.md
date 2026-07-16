@@ -11,8 +11,8 @@ and serves the archives over HTTP.
 cargo run --bin aribcap-db -- serve --config ./config.toml
 ```
 
-Set `data_dir`, `listen`, and `retention` in the `[serve]` section, or override
-them on the command line:
+Set `data_dir`, `listen`, `retention`, and the optional MCP switch in the
+`[serve]` section, or override the first three on the command line:
 
 ```sh
 aribcap-db serve \
@@ -41,6 +41,25 @@ returns `503 Service Unavailable`.
 
 See the [HTTP API reference](docs/http-api.md) for request parameters, response
 behavior, record collisions, and live-stream delivery semantics.
+
+## MCP server
+
+Enable the read-only Streamable HTTP MCP server in the configuration:
+
+```toml
+[serve]
+data_dir = "./aribcap-db-data"
+listen = "0.0.0.0:40773"
+mcp = true
+```
+
+The endpoint is `http://<server-address>:40773/mcp`. It provides tools for
+listing archive streams, searching program metadata and captions, and
+retrieving structured caption lines.
+
+See the [MCP server reference](docs/mcp.md) for client setup, tool arguments and
+results, search and pagination behavior, availability, and network
+considerations.
 
 ## Operations
 
