@@ -152,13 +152,7 @@ fn router_with_session_manager(
 }
 
 fn tool_error(error: QueryServiceError) -> String {
-    match error {
-        QueryServiceError::Internal(error) => {
-            tracing::error!(%error, "MCP tool failed");
-            "internal query error".to_owned()
-        }
-        error => error.to_string(),
-    }
+    error.into_client_message("mcp")
 }
 
 #[cfg(test)]
@@ -172,6 +166,13 @@ mod tests {
     use tower::ServiceExt as _;
 
     use super::*;
+
+    #[test]
+    fn internal_tool_errors_are_redacted() {
+        let error = QueryServiceError::Internal(anyhow::anyhow!("sensitive database detail"));
+
+        assert_eq!(tool_error(error), "internal query error");
+    }
 
     #[tokio::test]
     async fn data_tools_report_when_search_database_is_not_ready() {

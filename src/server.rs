@@ -252,7 +252,7 @@ impl From<QueryServiceError> for HttpError {
         };
         Self {
             status,
-            message: error.to_string(),
+            message: error.into_client_message("http"),
         }
     }
 }
@@ -310,6 +310,24 @@ mod tests {
     const OTHER_ARCHIVE_FILE_NAME: &str = "2020-01-02_00-00-00.other.jsonl";
     const OTHER_ARCHIVE_FILE_BODY: &str = "{\"type\":\"eit\",\"section\":\"present\",\"startTime\":\"2020-01-02T00:00:00.000+09:00\",\"durationSec\":1800,\"shortEvents\":[{\"languageCode\":\"jpn\",\"eventName\":\"other title\"}]}\n{\"type\":\"caption\",\"time\":\"2020-01-02T00:00:01.000+09:00\",\"text\":\"caption\",\"languageCode\":\"jpn\",\"durationMs\":500}\n";
     const RAW_PROGRAM_PATH: &str = "/api/programs/nhk/2020-01-01_00-00-00";
+
+    #[tokio::test]
+    async fn internal_query_error_is_redacted_in_http_response() {
+        let response = HttpError::from(QueryServiceError::Internal(anyhow::anyhow!(
+            "sensitive database detail"
+        )))
+        .into_response();
+
+        assert_eq!(response.status(), StatusCode::INTERNAL_SERVER_ERROR);
+        let body = to_bytes(response.into_body(), usize::MAX).await.unwrap();
+        let body: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        assert_eq!(
+            body,
+            serde_json::json!({
+                "error": "internal query error",
+            })
+        );
+    }
 
     #[tokio::test]
     async fn archive_routes_list_and_stream_program() {

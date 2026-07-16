@@ -32,6 +32,18 @@ impl QueryServiceError {
     fn internal(error: impl Into<anyhow::Error>) -> Self {
         Self::Internal(error.into())
     }
+
+    pub(crate) fn into_client_message(self, transport: &'static str) -> String {
+        match self {
+            Self::BadRequest(message) | Self::NotFound(message) | Self::Unavailable(message) => {
+                message
+            }
+            Self::Internal(error) => {
+                tracing::error!(%error, transport, "archive query failed");
+                "internal query error".to_owned()
+            }
+        }
+    }
 }
 
 impl std::fmt::Display for QueryServiceError {
