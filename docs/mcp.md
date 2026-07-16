@@ -13,20 +13,21 @@ the configuration:
 ```toml
 [serve]
 data_dir = "./aribcap-db-data"
-listen = "127.0.0.1:40773"
+addrs = [{ tcp = "127.0.0.1:40773" }]
 mcp = true
 ```
 
-Start `aribcap-db serve` as usual. The MCP server uses the same listener as the
-HTTP API and exposes its endpoint at `/mcp`:
+Start `aribcap-db serve` as usual. The MCP server uses the same router as the
+HTTP API, reachable from every address in `[serve].addrs`, and exposes its
+endpoint at `/mcp`:
 
 ```text
 http://127.0.0.1:40773/mcp
 ```
 
-Replace the host and port with the configured `listen` address when connecting
-from another machine. If `mcp` is omitted or set to `false`, the MCP server is
-not exposed and requests to `/mcp` return `404 Not Found`.
+Replace the host and port with one of the configured `addrs` entries when
+connecting from another machine. If `mcp` is omitted or set to `false`, the
+MCP server is not exposed and requests to `/mcp` return `404 Not Found`.
 
 Clients must support Streamable HTTP to connect to the MCP server at `/mcp`.
 

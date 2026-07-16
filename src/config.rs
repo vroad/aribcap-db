@@ -1,6 +1,7 @@
 use std::{
     collections::BTreeMap,
-    fs,
+    fmt, fs,
+    net::SocketAddr,
     path::{Path, PathBuf},
 };
 
@@ -36,10 +37,31 @@ pub struct StreamConfig {
 #[derive(Debug, Clone, Deserialize)]
 pub struct ServeConfig {
     pub data_dir: Option<PathBuf>,
-    pub listen: Option<String>,
+
+    /// HTTP listen addresses: any number of `{ tcp = ".." }` and
+    /// `{ unix_socket = ".." }` entries, all serving the same router.
+    #[serde(default)]
+    pub addrs: Vec<ListenAddr>,
+
     pub retention: Option<String>,
     #[serde(default)]
     pub mcp: bool,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Hash, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ListenAddr {
+    Tcp(SocketAddr),
+    UnixSocket(PathBuf),
+}
+
+impl fmt::Display for ListenAddr {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            ListenAddr::Tcp(addr) => write!(f, "{addr}"),
+            ListenAddr::UnixSocket(path) => write!(f, "unix:{}", path.display()),
+        }
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -211,7 +233,7 @@ url_template = "http://example.test/{{ channel }}"
 vars.channel = "nhk"
 
 [serve]
-listen = "127.0.0.1:40773"
+addrs = [{ tcp = "127.0.0.1:40773" }]
 "#,
         )
         .unwrap();
@@ -231,6 +253,36 @@ mcp = true
         )
         .unwrap();
         assert!(enabled.serve.unwrap().mcp);
+    }
+
+    #[test]
+    fn parses_multiple_tcp_and_unix_socket_listen_addrs() {
+        let config: Config = toml::from_str(
+            r#"
+[upstream]
+url_template = "http://example.test/{{ channel }}"
+
+[streams.nhk]
+vars.channel = "nhk"
+
+[serve]
+addrs = [
+    { tcp = "127.0.0.1:40773" },
+    { tcp = "0.0.0.0:40774" },
+    { unix_socket = "/run/aribcap-db/aribcap-db.sock" },
+]
+"#,
+        )
+        .unwrap();
+
+        assert_eq!(
+            config.serve.unwrap().addrs,
+            vec![
+                ListenAddr::Tcp("127.0.0.1:40773".parse().unwrap()),
+                ListenAddr::Tcp("0.0.0.0:40774".parse().unwrap()),
+                ListenAddr::UnixSocket(PathBuf::from("/run/aribcap-db/aribcap-db.sock")),
+            ]
+        );
     }
 
     #[test]

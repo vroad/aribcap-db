@@ -14,7 +14,11 @@ vars.channel = "nhke"
 
 [serve]
 data_dir = "./aribcap-db-data"
-listen = "127.0.0.1:40773"
+# List any number of `{ tcp = "..." }` and `{ unix_socket = "..." }` entries.
+addrs = [
+  { tcp = "127.0.0.1:40773" },
+  # { unix_socket = "/run/aribcap-db/aribcap-db.sock" },
+]
 retention = "30d"
 # Expose the read-only HTTP MCP server at /mcp.
 mcp = false

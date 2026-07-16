@@ -11,17 +11,33 @@ and serves archived programs over HTTP.
 cargo run --bin aribcap-db -- serve --config ./config.toml
 ```
 
-Set `data_dir`, `listen`, `retention`, and the optional MCP switch in the
+Set `data_dir`, `addrs`, `retention`, and the optional MCP switch in the
 `[serve]` section:
 
 ```toml
 [serve]
 data_dir = "./aribcap-db-data"
-listen = "127.0.0.1:40773"
+addrs = [{ tcp = "127.0.0.1:40773" }]
 retention = "30d"
 ```
 
-The HTTP server listens on `127.0.0.1:40773` when `listen` is omitted.
+The HTTP server listens on `127.0.0.1:40773` when `[serve].addrs` is omitted.
+`addrs` accepts any number of `tcp` and `unix_socket` entries, all serving the
+same HTTP API:
+
+```toml
+[serve]
+addrs = [
+  { tcp = "127.0.0.1:40773" },
+  { unix_socket = "/run/aribcap-db/aribcap-db.sock" },
+]
+```
+
+Each `unix_socket` address also creates a sibling `<path>.lock` file, held for
+the listener's lifetime. It guards against two processes racing to clean up
+and rebind the same stale socket path; leave it in place, it is never meant to
+be deleted.
+
 Use [config.example.toml](config.example.toml) as a starting point.
 
 ## HTTP API
@@ -48,7 +64,7 @@ Enable the read-only Streamable HTTP MCP server in the configuration:
 ```toml
 [serve]
 data_dir = "./aribcap-db-data"
-listen = "0.0.0.0:40773"
+addrs = [{ tcp = "0.0.0.0:40773" }]
 mcp = true
 ```
 
@@ -72,9 +88,11 @@ configured retention period are removed.
 ### Service lifecycle
 
 HTTP failures do not stop archive ingest or garbage collection. After a bind or
-serve error, the HTTP server waits 15 seconds and tries to bind and serve again.
-On shutdown, the server stops accepting new HTTP connections and waits up to 10
-seconds for in-flight responses before closing them.
+serve error, a listener waits 15 seconds and tries to bind and serve again.
+On shutdown, every listener stops accepting new HTTP connections and waits up
+to 10 seconds for in-flight responses before closing them. Each address in
+`[serve].addrs` runs and retries independently, so a failure on one does not
+affect the others.
 
 ### Search index
 
