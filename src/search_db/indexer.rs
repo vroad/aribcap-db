@@ -92,13 +92,6 @@ async fn apply_search_cleanup(
     }
 }
 
-async fn collect_garbage(
-    store: Arc<Mutex<ArchiveStore>>,
-    retention: Duration,
-) -> std::result::Result<Result<usize>, tokio::task::JoinError> {
-    tokio::task::spawn_blocking(move || archive::collect_garbage(&store, retention)).await
-}
-
 fn gc_is_due(last_gc_finished_at: Instant, now: Instant, interval: Duration) -> bool {
     now.duration_since(last_gc_finished_at) >= interval
 }
@@ -154,13 +147,17 @@ pub(crate) async fn run_archive_maintenance(
             continue;
         }
 
-        match collect_garbage(store.clone(), config.retention).await {
-            Ok(Ok(0)) => {}
-            Ok(Ok(files_removed)) => {
+        let gc_result = tokio::select! {
+            biased;
+            _ = shutdown.changed() => break,
+            result = archive::collect_garbage(&store, config.retention) => result,
+        };
+        match gc_result {
+            Ok(0) => {}
+            Ok(files_removed) => {
                 tracing::info!(files_removed, "Archive garbage collection finished")
             }
-            Ok(Err(error)) => tracing::warn!(%error, "Archive garbage collection failed"),
-            Err(error) => tracing::warn!(%error, "Archive garbage collection task failed"),
+            Err(error) => tracing::warn!(%error, "Archive garbage collection failed"),
         }
         last_gc_finished_at = Instant::now();
         cleanup_pending = true;

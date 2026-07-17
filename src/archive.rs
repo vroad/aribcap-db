@@ -1,6 +1,7 @@
 use std::{
     collections::{BTreeMap, HashMap, HashSet},
     fs::{self, File, OpenOptions},
+    future::Future,
     io::{self, Write as _},
     path::{Path, PathBuf},
     sync::{Arc, Mutex, MutexGuard},
@@ -428,12 +429,12 @@ pub fn validate_retention(retention: Duration) -> Result<()> {
 }
 
 /// Runs garbage collection without deleting files and reports what it found.
-pub fn dry_run_garbage_collection(
+pub async fn dry_run_garbage_collection(
     store: &Arc<Mutex<ArchiveStore>>,
     retention: Duration,
 ) -> Result<GarbageCollectionDryRun> {
     let cutoff = retention_cutoff(jst_now(), retention)?;
-    let eligible_files = visit_expired_files(store, cutoff, |_| Ok(()))?;
+    let eligible_files = visit_expired_files(store, cutoff, |_| async { Ok(()) }).await?;
     Ok(GarbageCollectionDryRun {
         eligible_files,
         cutoff,
@@ -443,14 +444,20 @@ pub fn dry_run_garbage_collection(
 /// Deletes completed archive files whose recording-start timestamp is older
 /// than `retention`. Active files are never removed. Empty month directories
 /// are removed, while stream directories are retained.
-pub fn collect_garbage(store: &Arc<Mutex<ArchiveStore>>, retention: Duration) -> Result<usize> {
+pub async fn collect_garbage(
+    store: &Arc<Mutex<ArchiveStore>>,
+    retention: Duration,
+) -> Result<usize> {
     let cutoff = retention_cutoff(jst_now(), retention)?;
     let data_dir = lock_store(store).data_dir.clone();
-    let files_removed = visit_expired_files(store, cutoff, |path| {
-        fs::remove_file(path).with_context(|| format!("failed to remove {}", path.display()))?;
+    let files_removed = visit_expired_files(store, cutoff, |path| async move {
+        tokio::fs::remove_file(&path)
+            .await
+            .with_context(|| format!("failed to remove {}", path.display()))?;
         Ok(())
-    })?;
-    remove_empty_month_directories(&data_dir)?;
+    })
+    .await?;
+    remove_empty_month_directories(&data_dir).await?;
     Ok(files_removed)
 }
 
@@ -463,41 +470,44 @@ fn retention_cutoff(
         .context("retention exceeds the supported date range")
 }
 
-fn visit_expired_files(
+async fn visit_expired_files<F, Fut>(
     store: &Arc<Mutex<ArchiveStore>>,
     cutoff: DateTime<FixedOffset>,
-    mut on_expired: impl FnMut(&Path) -> Result<()>,
-) -> Result<usize> {
+    mut on_expired: F,
+) -> Result<usize>
+where
+    F: FnMut(PathBuf) -> Fut,
+    Fut: Future<Output = Result<()>>,
+{
     let (data_dir, active_paths) = {
         let store = lock_store(store);
         (store.data_dir.clone(), store.active_paths())
     };
     let mut eligible = 0;
     let root = archive_root(&data_dir);
-    let Ok(streams) = fs::read_dir(&root) else {
+    let Ok(mut streams) = tokio::fs::read_dir(&root).await else {
         return Ok(eligible);
     };
 
-    for stream in streams {
-        let stream = stream?;
-        if !stream.file_type()?.is_dir() {
+    while let Some(stream) = streams.next_entry().await? {
+        if !stream.file_type().await?.is_dir() {
             continue;
         }
-        for month in fs::read_dir(stream.path())? {
-            let month = month?;
-            if !month.file_type()?.is_dir() {
+        let mut months = tokio::fs::read_dir(stream.path()).await?;
+        while let Some(month) = months.next_entry().await? {
+            if !month.file_type().await?.is_dir() {
                 continue;
             }
-            for entry in fs::read_dir(month.path())? {
-                let entry = entry?;
+            let mut entries = tokio::fs::read_dir(month.path()).await?;
+            while let Some(entry) = entries.next_entry().await? {
                 let path = entry.path();
-                if !entry.file_type()?.is_file() || !is_expired(&path, cutoff) {
+                if !entry.file_type().await?.is_file() || !is_expired(&path, cutoff) {
                     continue;
                 }
                 if active_paths.contains(&path) {
                     continue;
                 }
-                on_expired(&path)?;
+                on_expired(path).await?;
                 eligible += 1;
             }
         }
@@ -505,26 +515,25 @@ fn visit_expired_files(
     Ok(eligible)
 }
 
-fn remove_empty_month_directories(data_dir: &Path) -> Result<()> {
+async fn remove_empty_month_directories(data_dir: &Path) -> Result<()> {
     let root = archive_root(data_dir);
-    let Ok(streams) = fs::read_dir(&root) else {
+    let Ok(mut streams) = tokio::fs::read_dir(&root).await else {
         return Ok(());
     };
 
-    for stream in streams {
-        let stream = stream?;
-        if !stream.file_type()?.is_dir() {
+    while let Some(stream) = streams.next_entry().await? {
+        if !stream.file_type().await?.is_dir() {
             continue;
         }
-        for month in fs::read_dir(stream.path())? {
-            let month = month?;
-            if !month.file_type()?.is_dir()
+        let mut months = tokio::fs::read_dir(stream.path()).await?;
+        while let Some(month) = months.next_entry().await? {
+            if !month.file_type().await?.is_dir()
                 || !is_month_component(&month.file_name().to_string_lossy())
             {
                 continue;
             }
             let path = month.path();
-            match fs::remove_dir(&path) {
+            match tokio::fs::remove_dir(&path).await {
                 Ok(()) => {}
                 Err(error)
                     if matches!(
@@ -641,8 +650,8 @@ mod tests {
         );
     }
 
-    #[test]
-    fn garbage_collection_dry_run_counts_without_deleting() {
+    #[tokio::test]
+    async fn garbage_collection_dry_run_counts_without_deleting() {
         let data_dir = std::env::temp_dir().join(format!(
             "aribcap-archive-gc-dry-run-test-{}",
             std::process::id()
@@ -654,16 +663,17 @@ mod tests {
         fs::write(&expired, "{}\n").unwrap();
         let store = Arc::new(Mutex::new(ArchiveStore::new(&data_dir)));
 
-        let dry_run =
-            dry_run_garbage_collection(&store, Duration::from_secs(24 * 60 * 60)).unwrap();
+        let dry_run = dry_run_garbage_collection(&store, Duration::from_secs(24 * 60 * 60))
+            .await
+            .unwrap();
 
         assert_eq!(dry_run.eligible_files, 1);
         assert!(expired.exists());
         fs::remove_dir_all(data_dir).unwrap();
     }
 
-    #[test]
-    fn garbage_collection_deletes_expired_file_after_deactivation() {
+    #[tokio::test]
+    async fn garbage_collection_deletes_expired_file_after_deactivation() {
         let data_dir = std::env::temp_dir().join(format!(
             "aribcap-archive-gc-active-test-{}",
             std::process::id()
@@ -680,18 +690,18 @@ mod tests {
         };
         let retention = Duration::from_secs(24 * 60 * 60);
 
-        assert_eq!(collect_garbage(&store, retention).unwrap(), 0);
+        assert_eq!(collect_garbage(&store, retention).await.unwrap(), 0);
         assert!(path.exists());
 
         deactivate_stream(&store, "nhk");
 
-        assert_eq!(collect_garbage(&store, retention).unwrap(), 1);
+        assert_eq!(collect_garbage(&store, retention).await.unwrap(), 1);
         assert!(!path.exists());
         fs::remove_dir_all(data_dir).unwrap();
     }
 
-    #[test]
-    fn garbage_collection_removes_empty_month_but_keeps_stream_directory() {
+    #[tokio::test]
+    async fn garbage_collection_removes_empty_month_but_keeps_stream_directory() {
         let data_dir = std::env::temp_dir().join(format!(
             "aribcap-archive-gc-empty-month-test-{}",
             std::process::id()
@@ -708,7 +718,9 @@ mod tests {
         let store = Arc::new(Mutex::new(ArchiveStore::new(&data_dir)));
 
         assert_eq!(
-            collect_garbage(&store, Duration::from_secs(24 * 60 * 60)).unwrap(),
+            collect_garbage(&store, Duration::from_secs(24 * 60 * 60))
+                .await
+                .unwrap(),
             1
         );
         assert!(!month_directory.exists());

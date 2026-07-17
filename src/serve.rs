@@ -67,29 +67,27 @@ pub async fn run(args: ServeArgs) -> Result<()> {
         live_broadcaster.clone(),
         shutdown_rx.clone(),
     ));
-    let gc_dry_run_store = store.clone();
-    let mut gc_dry_run_task = tokio::task::spawn_blocking(move || {
-        archive::dry_run_garbage_collection(&gc_dry_run_store, retention)
-    });
 
     // -------------------------------------------------------------------------
     // Wait for the garbage-collection dry run to finish
     // -------------------------------------------------------------------------
-    let gc_dry_run_result = tokio::select! {
-        signal_result = &mut signal => {
-            let _ = shutdown_tx.send(true);
-            gc_dry_run_task.abort();
-            join(ingest_task, "JSONL ingest").await;
-            return signal_result;
+    let gc_dry_run_result = {
+        let gc_dry_run = archive::dry_run_garbage_collection(&store, retention);
+        tokio::pin!(gc_dry_run);
+        tokio::select! {
+            signal_result = &mut signal => {
+                let _ = shutdown_tx.send(true);
+                join(ingest_task, "JSONL ingest").await;
+                return signal_result;
+            }
+            result = &mut ingest_task => {
+                let error = unexpected_service_exit("JSONL ingest", result);
+                tracing::error!(%error, "Service task stopped");
+                let _ = shutdown_tx.send(true);
+                return Err(error);
+            }
+            result = &mut gc_dry_run => result,
         }
-        result = &mut ingest_task => {
-            let error = unexpected_service_exit("JSONL ingest", result);
-            tracing::error!(%error, "Service task stopped");
-            let _ = shutdown_tx.send(true);
-            gc_dry_run_task.abort();
-            return Err(error);
-        }
-        result = &mut gc_dry_run_task => result,
     };
     log_gc_dry_run(gc_dry_run_result, retention, &data_dir);
 
@@ -176,14 +174,14 @@ pub async fn run(args: ServeArgs) -> Result<()> {
 }
 
 fn log_gc_dry_run(
-    result: std::result::Result<Result<archive::GarbageCollectionDryRun>, tokio::task::JoinError>,
+    result: Result<archive::GarbageCollectionDryRun>,
     retention: Duration,
     data_dir: &std::path::Path,
 ) {
     let archive_root = archive::archive_root(data_dir);
 
     match result {
-        Ok(Ok(dry_run)) => tracing::info!(
+        Ok(dry_run) => tracing::info!(
             eligible_files = dry_run.eligible_files,
             retention = %humantime::format_duration(retention),
             cutoff = %dry_run.cutoff,
@@ -191,19 +189,12 @@ fn log_gc_dry_run(
             archive_root = %archive_root.display(),
             "Archive garbage collection dry run finished",
         ),
-        Ok(Err(error)) => tracing::warn!(
-            %error,
-            retention = %humantime::format_duration(retention),
-            interval = %humantime::format_duration(GC_INTERVAL),
-            archive_root = %archive_root.display(),
-            "Archive garbage collection dry run failed",
-        ),
         Err(error) => tracing::warn!(
             %error,
             retention = %humantime::format_duration(retention),
             interval = %humantime::format_duration(GC_INTERVAL),
             archive_root = %archive_root.display(),
-            "Archive garbage collection dry run task failed",
+            "Archive garbage collection dry run failed",
         ),
     }
 }
