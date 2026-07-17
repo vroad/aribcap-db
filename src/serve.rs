@@ -96,15 +96,22 @@ pub async fn run(args: ServeArgs) -> Result<()> {
     let search_db_path = search_db::search_db_path(&data_dir);
     let search_db_ready = Arc::new(AtomicBool::new(false));
     let mcp_cancellation = cancellation_token_on_shutdown(shutdown_rx.clone());
-    let (maintenance_shutdown_tx, maintenance_shutdown_rx) = watch::channel(false);
-    let mut maintenance_task = tokio::spawn(archive_maintenance_loop(
-        search_db_path.clone(),
-        archive::archive_root(&data_dir),
-        store.clone(),
-        retention,
-        search_db_ready.clone(),
-        maintenance_shutdown_rx,
-    ));
+    let (maintenance_shutdown_tx, _) = watch::channel(false);
+    let spawn_archive_maintenance = |shutdown| {
+        tokio::spawn(search_db::run_archive_maintenance(
+            search_db_path.clone(),
+            archive::archive_root(&data_dir),
+            search_db::ArchiveMaintenanceConfig {
+                index_interval: SEARCH_INDEX_INTERVAL,
+                gc_interval: GC_INTERVAL,
+                retention,
+            },
+            store.clone(),
+            search_db_ready.clone(),
+            shutdown,
+        ))
+    };
+    let mut maintenance_task = spawn_archive_maintenance(maintenance_shutdown_tx.subscribe());
     let app = server::router(
         data_dir.clone(),
         search_db_path.clone(),
@@ -158,14 +165,8 @@ pub async fn run(args: ServeArgs) -> Result<()> {
             result = &mut maintenance_task => {
                 let error = unexpected_service_exit("archive maintenance", result);
                 tracing::error!(%error, "Service task stopped; restarting");
-                maintenance_task = tokio::spawn(archive_maintenance_loop(
-                    search_db_path.clone(),
-                    archive::archive_root(&data_dir),
-                    store.clone(),
-                    retention,
-                    search_db_ready.clone(),
-                    maintenance_shutdown_tx.subscribe(),
-                ));
+                maintenance_task =
+                    spawn_archive_maintenance(maintenance_shutdown_tx.subscribe());
             }
         }
     }
@@ -572,54 +573,6 @@ async fn retry_until_shutdown<RunOnce, Run>(
             return;
         }
         if sleep_or_shutdown(retry_interval, shutdown).await {
-            return;
-        }
-    }
-}
-
-async fn archive_maintenance_loop(
-    db_path: PathBuf,
-    archive_root: PathBuf,
-    store: Arc<Mutex<ArchiveStore>>,
-    retention: Duration,
-    search_db_ready: Arc<AtomicBool>,
-    mut shutdown: watch::Receiver<bool>,
-) {
-    loop {
-        let result = search_db::run_archive_maintenance(
-            db_path.clone(),
-            archive_root.clone(),
-            search_db::ArchiveMaintenanceConfig {
-                index_interval: SEARCH_INDEX_INTERVAL,
-                gc_interval: GC_INTERVAL,
-                retention,
-            },
-            store.clone(),
-            search_db_ready.clone(),
-            shutdown.clone(),
-        )
-        .await;
-
-        if requested(&shutdown) {
-            if let Err(error) = result {
-                tracing::warn!(%error, "Archive maintenance shutdown processing failed");
-            }
-            return;
-        }
-
-        match result {
-            Ok(()) => tracing::warn!(
-                retry_in = ?RETRY_INTERVAL,
-                "Archive maintenance stopped unexpectedly"
-            ),
-            Err(error) => tracing::warn!(
-                %error,
-                retry_in = ?RETRY_INTERVAL,
-                "Archive maintenance failed"
-            ),
-        }
-
-        if sleep_or_shutdown(RETRY_INTERVAL, &mut shutdown).await {
             return;
         }
     }

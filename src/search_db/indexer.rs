@@ -34,7 +34,7 @@ async fn apply_pending_archive_changes(
     archive_root: &Path,
     store: &Arc<Mutex<ArchiveStore>>,
     phase: &str,
-) -> Result<()> {
+) {
     let dirty_paths = archive::lock_store(store).snapshot_dirty_paths();
     for (path, generation) in dirty_paths {
         match ingest_paths(conn, archive_root, [path.clone()]).await {
@@ -46,8 +46,6 @@ async fn apply_pending_archive_changes(
             }
         }
     }
-
-    Ok(())
 }
 
 async fn apply_search_changes(
@@ -58,13 +56,14 @@ async fn apply_search_changes(
     search_db_ready: &AtomicBool,
     cleanup_pending: &mut bool,
     phase: &str,
-) -> Result<()> {
+) {
     if conn.is_none() {
+        search_db_ready.store(false, Ordering::Release);
         let mut new_conn = match open_and_migrate(db_path).await {
             Ok(conn) => conn,
             Err(error) => {
                 tracing::warn!(%error, phase, "failed to open search database");
-                return Ok(());
+                return;
             }
         };
         search_db_ready.store(true, Ordering::Release);
@@ -75,9 +74,8 @@ async fn apply_search_changes(
     }
 
     let conn = conn.as_mut().expect("search connection was initialized");
-    apply_pending_archive_changes(conn, archive_root, store, phase).await?;
+    apply_pending_archive_changes(conn, archive_root, store, phase).await;
     apply_search_cleanup(conn, cleanup_pending, phase).await;
-    Ok(())
 }
 
 async fn apply_search_cleanup(
@@ -104,10 +102,10 @@ fn gc_is_due(last_gc_finished_at: Instant, now: Instant, interval: Duration) -> 
     now.duration_since(last_gc_finished_at) >= interval
 }
 
-pub struct ArchiveMaintenanceConfig {
-    pub index_interval: Duration,
-    pub gc_interval: Duration,
-    pub retention: Duration,
+pub(crate) struct ArchiveMaintenanceConfig {
+    pub(crate) index_interval: Duration,
+    pub(crate) gc_interval: Duration,
+    pub(crate) retention: Duration,
 }
 
 /// Keeps the search database synchronized and runs archive garbage collection.
@@ -115,14 +113,14 @@ pub struct ArchiveMaintenanceConfig {
 /// The first search pass runs immediately. Later passes run after
 /// `index_interval`; a due garbage-collection pass runs after the search pass.
 /// Before exiting, the task makes one final attempt to index pending changes.
-pub async fn run_archive_maintenance(
+pub(crate) async fn run_archive_maintenance(
     db_path: PathBuf,
     archive_root: PathBuf,
     config: ArchiveMaintenanceConfig,
     store: Arc<Mutex<ArchiveStore>>,
     search_db_ready: Arc<AtomicBool>,
     mut shutdown: watch::Receiver<bool>,
-) -> Result<()> {
+) {
     let mut conn = None;
     let mut cleanup_pending = true;
     let mut last_gc_finished_at = Instant::now();
@@ -136,7 +134,7 @@ pub async fn run_archive_maintenance(
         &mut cleanup_pending,
         "startup",
     )
-    .await?;
+    .await;
 
     while !sleep_or_shutdown(config.index_interval, &mut shutdown).await {
         apply_search_changes(
@@ -148,7 +146,7 @@ pub async fn run_archive_maintenance(
             &mut cleanup_pending,
             "steady-state",
         )
-        .await?;
+        .await;
 
         let now = Instant::now();
         if !gc_is_due(last_gc_finished_at, now, config.gc_interval) {
@@ -180,7 +178,7 @@ pub async fn run_archive_maintenance(
         &mut cleanup_pending,
         "shutdown",
     )
-    .await
+    .await;
 }
 
 /// Rebuilds the search index by deleting the search database and re-ingesting
@@ -250,9 +248,7 @@ mod tests {
         fs::remove_file(&path).unwrap();
         let mut conn = open_and_migrate(&search_db_path(&data_dir)).await.unwrap();
 
-        apply_pending_archive_changes(&mut conn, &archive_root, &store, "test")
-            .await
-            .unwrap();
+        apply_pending_archive_changes(&mut conn, &archive_root, &store, "test").await;
         assert!(
             archive::lock_store(&store)
                 .snapshot_dirty_paths()
@@ -260,9 +256,7 @@ mod tests {
         );
 
         fs::write(&path, format!("{line}\n")).unwrap();
-        apply_pending_archive_changes(&mut conn, &archive_root, &store, "test")
-            .await
-            .unwrap();
+        apply_pending_archive_changes(&mut conn, &archive_root, &store, "test").await;
 
         assert!(
             archive::lock_store(&store)

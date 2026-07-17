@@ -9,7 +9,8 @@ mod text;
 mod test_support;
 
 pub use db::{open_and_migrate, open_reader_pool, search_db_path};
-pub use indexer::{ArchiveMaintenanceConfig, run_archive_maintenance, run_rebuild};
+pub use indexer::run_rebuild;
+pub(crate) use indexer::{ArchiveMaintenanceConfig, run_archive_maintenance};
 pub use ingest::{cleanup_index_for_deleted_files, ingest_once, ingest_paths};
 pub use query::{
     CaptionLine, CaptionPage, GenreFilter, IndexedProgram, ProgramDetails, SearchFilter, SearchHit,
