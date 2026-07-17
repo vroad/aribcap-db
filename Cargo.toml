@@ -47,7 +47,6 @@ unicode-normalization = "0.1.25"
 unicode-width = "0.2"
 upon = { version = "0.10", default-features = false, features = ["serde"] }
 urlencoding = "2.1"
-walkdir = "2.5.0"
 
 [dev-dependencies]
 tower = { version = "0.5", features = ["util"] }

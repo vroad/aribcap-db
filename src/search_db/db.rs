@@ -1,5 +1,4 @@
 use std::{
-    fs,
     path::{Path, PathBuf},
     time::Duration,
 };
@@ -30,7 +29,8 @@ pub fn search_db_path(data_dir: &Path) -> PathBuf {
 /// pending migrations.
 pub async fn open_and_migrate(db_path: &Path) -> Result<SqliteConnection> {
     if let Some(parent) = db_path.parent() {
-        fs::create_dir_all(parent)
+        tokio::fs::create_dir_all(parent)
+            .await
             .with_context(|| format!("failed to create {}", parent.display()))?;
     }
 

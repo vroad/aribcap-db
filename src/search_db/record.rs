@@ -1,7 +1,6 @@
 use std::path::{Path, PathBuf};
 
 use serde_json::Value;
-use walkdir::WalkDir;
 
 pub(super) struct EitPresent {
     pub(super) start_time: Option<String>,
@@ -165,20 +164,38 @@ pub(super) fn stream_month_filename(
     Some((stream, month, filename))
 }
 
-pub(super) fn scan_jsonl_files(archive_root: &Path) -> Vec<PathBuf> {
-    if !archive_root.exists() {
+pub(super) async fn scan_jsonl_files(archive_root: &Path) -> Vec<PathBuf> {
+    let Ok(mut streams) = tokio::fs::read_dir(archive_root).await else {
         return Vec::new();
+    };
+    let mut paths = Vec::new();
+
+    while let Ok(Some(stream)) = streams.next_entry().await {
+        if !stream.file_type().await.is_ok_and(|kind| kind.is_dir()) {
+            continue;
+        }
+        let Ok(mut months) = tokio::fs::read_dir(stream.path()).await else {
+            continue;
+        };
+        while let Ok(Some(month)) = months.next_entry().await {
+            if !month.file_type().await.is_ok_and(|kind| kind.is_dir()) {
+                continue;
+            }
+            let Ok(mut entries) = tokio::fs::read_dir(month.path()).await else {
+                continue;
+            };
+            while let Ok(Some(entry)) = entries.next_entry().await {
+                let path = entry.path();
+                if entry.file_type().await.is_ok_and(|kind| kind.is_file())
+                    && path.extension().and_then(|ext| ext.to_str()) == Some("jsonl")
+                {
+                    paths.push(path);
+                }
+            }
+        }
     }
 
-    WalkDir::new(archive_root)
-        .into_iter()
-        .filter_map(|entry| entry.ok())
-        .filter(|entry| {
-            entry.file_type().is_file()
-                && entry.path().extension().and_then(|ext| ext.to_str()) == Some("jsonl")
-        })
-        .map(|entry| entry.path().to_path_buf())
-        .collect()
+    paths
 }
 
 #[cfg(test)]

@@ -1,5 +1,4 @@
 use std::{
-    fs,
     path::{Path, PathBuf},
     sync::{
         Arc, Mutex,
@@ -191,7 +190,7 @@ pub async fn run_rebuild(data_dir: &Path) -> Result<()> {
 
     for suffix in ["", "-wal", "-shm"] {
         let path = PathBuf::from(format!("{}{suffix}", db_path.display()));
-        match fs::remove_file(&path) {
+        match tokio::fs::remove_file(&path).await {
             Ok(()) => {}
             Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
             Err(error) => {
@@ -208,6 +207,8 @@ pub async fn run_rebuild(data_dir: &Path) -> Result<()> {
 
 #[cfg(test)]
 mod tests {
+    use std::fs;
+
     use super::*;
     use crate::archive::ArchiveEvent;
 

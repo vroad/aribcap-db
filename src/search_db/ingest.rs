@@ -1,12 +1,9 @@
-use std::{
-    fs::{self, File},
-    io::{Read, Seek, SeekFrom},
-    path::{Path, PathBuf},
-};
+use std::path::{Path, PathBuf};
 
 use anyhow::{Context, Result};
 use serde_json::Value;
 use sqlx::{Connection, SqliteConnection};
+use tokio::io::{AsyncReadExt as _, AsyncSeekExt as _, SeekFrom};
 
 use crate::archive::parse_recording_started_at;
 
@@ -29,37 +26,29 @@ struct ArchiveFileMetadata {
 }
 
 async fn stat_archive_file(path: &Path) -> Result<ArchiveFileMetadata> {
-    let path = path.to_owned();
-    tokio::task::spawn_blocking(move || {
-        let metadata =
-            fs::metadata(&path).with_context(|| format!("failed to stat {}", path.display()))?;
-        let mtime = metadata
-            .modified()
-            .ok()
-            .and_then(|modified| modified.duration_since(std::time::UNIX_EPOCH).ok())
-            .map(|duration| duration.as_secs() as i64)
-            .unwrap_or(0);
-        Ok(ArchiveFileMetadata {
-            size_bytes: metadata.len() as i64,
-            mtime,
-        })
+    let metadata = tokio::fs::metadata(path)
+        .await
+        .with_context(|| format!("failed to stat {}", path.display()))?;
+    let mtime = metadata
+        .modified()
+        .ok()
+        .and_then(|modified| modified.duration_since(std::time::UNIX_EPOCH).ok())
+        .map(|duration| duration.as_secs() as i64)
+        .unwrap_or(0);
+    Ok(ArchiveFileMetadata {
+        size_bytes: metadata.len() as i64,
+        mtime,
     })
-    .await
-    .context("archive file metadata task failed")?
 }
 
 async fn read_archive_tail(path: &Path, start_offset: i64) -> Result<Vec<u8>> {
-    let path = path.to_owned();
-    tokio::task::spawn_blocking(move || {
-        let mut file =
-            File::open(&path).with_context(|| format!("failed to open {}", path.display()))?;
-        file.seek(SeekFrom::Start(start_offset as u64))?;
-        let mut buffer = Vec::new();
-        file.read_to_end(&mut buffer)?;
-        Ok(buffer)
-    })
-    .await
-    .context("archive file read task failed")?
+    let mut file = tokio::fs::File::open(path)
+        .await
+        .with_context(|| format!("failed to open {}", path.display()))?;
+    file.seek(SeekFrom::Start(start_offset as u64)).await?;
+    let mut buffer = Vec::new();
+    file.read_to_end(&mut buffer).await?;
+    Ok(buffer)
 }
 
 async fn load_indexed_file(
@@ -588,7 +577,7 @@ pub async fn ingest_paths(
 
 /// Scans `archive_root` and indexes new data in its JSONL archive files.
 pub async fn ingest_once(conn: &mut SqliteConnection, archive_root: &Path) -> Result<()> {
-    ingest_paths(conn, archive_root, scan_jsonl_files(archive_root)).await
+    ingest_paths(conn, archive_root, scan_jsonl_files(archive_root).await).await
 }
 
 /// Deletes the `programs`/`indexed_files` rows for `path`. `ON DELETE
@@ -622,7 +611,7 @@ pub async fn cleanup_index_for_deleted_files(conn: &mut SqliteConnection) -> Res
     let mut removed = 0;
     let mut tx = conn.begin().await?;
     for path in paths {
-        if !Path::new(&path).exists() {
+        if !tokio::fs::try_exists(&path).await.unwrap_or(false) {
             delete_indexed_path(&mut tx, &path).await?;
             removed += 1;
         }
@@ -633,6 +622,8 @@ pub async fn cleanup_index_for_deleted_files(conn: &mut SqliteConnection) -> Res
 
 #[cfg(test)]
 mod tests {
+    use std::fs;
+
     use super::super::db::open_and_migrate;
     use super::super::test_support::{
         caption_line, eit_line, eit_line_with_genre, temp_dir, write_file,
