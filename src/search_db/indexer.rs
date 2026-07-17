@@ -35,11 +35,11 @@ async fn apply_pending_archive_changes(
     store: &Arc<Mutex<ArchiveStore>>,
     phase: &str,
 ) -> Result<()> {
-    let dirty_paths = archive::lock_store(store)?.snapshot_dirty_paths();
+    let dirty_paths = archive::lock_store(store).snapshot_dirty_paths();
     for (path, generation) in dirty_paths {
         match ingest_paths(conn, archive_root, [path.clone()]).await {
             Ok(()) => {
-                archive::lock_store(store)?.clear_dirty_path_if_unchanged(&path, generation);
+                archive::lock_store(store).clear_dirty_path_if_unchanged(&path, generation);
             }
             Err(error) => {
                 tracing::warn!(%error, phase, path = %path.display(), "search ingest pass failed");
@@ -246,7 +246,7 @@ mod tests {
         else {
             panic!("expected a new archive file");
         };
-        archive::deactivate_stream(&store, "nhk").unwrap();
+        archive::deactivate_stream(&store, "nhk");
         fs::remove_file(&path).unwrap();
         let mut conn = open_and_migrate(&search_db_path(&data_dir)).await.unwrap();
 
@@ -255,7 +255,6 @@ mod tests {
             .unwrap();
         assert!(
             archive::lock_store(&store)
-                .unwrap()
                 .snapshot_dirty_paths()
                 .contains_key(&path)
         );
@@ -267,7 +266,6 @@ mod tests {
 
         assert!(
             archive::lock_store(&store)
-                .unwrap()
                 .snapshot_dirty_paths()
                 .is_empty()
         );

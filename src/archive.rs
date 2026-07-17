@@ -7,7 +7,7 @@ use std::{
     time::Duration,
 };
 
-use anyhow::{Context, Result, anyhow};
+use anyhow::{Context, Result};
 use chrono::{DateTime, FixedOffset, NaiveDateTime, TimeZone as _, Utc};
 use serde::Serialize;
 use serde_json::Value;
@@ -158,9 +158,8 @@ pub fn handle_line(
 /// Closes and removes the active archive file for a stream, if one exists.
 /// Subsequent lines are skipped until `handle_line` receives a present EIT
 /// and opens a new archive file.
-pub fn deactivate_stream(store: &Arc<Mutex<ArchiveStore>>, stream_name: &str) -> Result<()> {
-    lock_store(store)?.active_archive_files.remove(stream_name);
-    Ok(())
+pub(crate) fn deactivate_stream(store: &Arc<Mutex<ArchiveStore>>, stream_name: &str) {
+    lock_store(store).active_archive_files.remove(stream_name);
 }
 
 fn handle_line_at(
@@ -178,7 +177,7 @@ fn handle_line_at(
     };
 
     let Some(program) = program_from_eit(&value) else {
-        return if lock_store(store)?.append_active(stream_name, line)? {
+        return if lock_store(store).append_active(stream_name, line)? {
             Ok(None)
         } else {
             Ok(Some(ArchiveEvent::SkippedNoProgram))
@@ -186,7 +185,7 @@ fn handle_line_at(
     };
 
     let data_dir = {
-        let mut store = lock_store(store)?;
+        let mut store = lock_store(store);
         if store.append_if_same_program(stream_name, &program.key, line)? {
             return Ok(None);
         }
@@ -196,14 +195,20 @@ fn handle_line_at(
     let mut active = open_archive_file(&data_dir, stream_name, &program, now)?;
     active.write_line(line)?;
     let path = active.path.clone();
-    lock_store(store)?.replace_active(stream_name.to_owned(), active);
+    lock_store(store).replace_active(stream_name.to_owned(), active);
     Ok(Some(ArchiveEvent::ProgramStarted(path)))
 }
 
-pub(crate) fn lock_store(store: &Arc<Mutex<ArchiveStore>>) -> Result<MutexGuard<'_, ArchiveStore>> {
-    store
-        .lock()
-        .map_err(|_| anyhow!("archive store mutex poisoned"))
+/// Locks the archive store, recovering poisoned state so recording can continue.
+pub(crate) fn lock_store(store: &Arc<Mutex<ArchiveStore>>) -> MutexGuard<'_, ArchiveStore> {
+    match store.lock() {
+        Ok(guard) => guard,
+        Err(poisoned) => {
+            tracing::error!("Archive store mutex was poisoned; continuing with recovered state");
+            store.clear_poison();
+            poisoned.into_inner()
+        }
+    }
 }
 
 #[derive(Debug)]
@@ -440,7 +445,7 @@ pub fn dry_run_garbage_collection(
 /// are removed, while stream directories are retained.
 pub fn collect_garbage(store: &Arc<Mutex<ArchiveStore>>, retention: Duration) -> Result<usize> {
     let cutoff = retention_cutoff(jst_now(), retention)?;
-    let data_dir = lock_store(store)?.data_dir.clone();
+    let data_dir = lock_store(store).data_dir.clone();
     let files_removed = visit_expired_files(store, cutoff, |path| {
         fs::remove_file(path).with_context(|| format!("failed to remove {}", path.display()))?;
         Ok(())
@@ -464,7 +469,7 @@ fn visit_expired_files(
     mut on_expired: impl FnMut(&Path) -> Result<()>,
 ) -> Result<usize> {
     let (data_dir, active_paths) = {
-        let store = lock_store(store)?;
+        let store = lock_store(store);
         (store.data_dir.clone(), store.active_paths())
     };
     let mut eligible = 0;
@@ -592,6 +597,39 @@ mod tests {
     }
 
     #[test]
+    fn continues_writing_after_store_mutex_is_poisoned() {
+        let data_dir = std::env::temp_dir().join(format!(
+            "aribcap-archive-poison-recovery-test-{}",
+            std::process::id()
+        ));
+        let _ = fs::remove_dir_all(&data_dir);
+        let store = Arc::new(Mutex::new(ArchiveStore::new(&data_dir)));
+        let now = DateTime::parse_from_rfc3339("2026-07-13T12:00:00+09:00").unwrap();
+        let eit = r#"{"type":"eit","section":"present","eventId":1}"#;
+        let caption = r#"{"type":"caption","text":"after poison"}"#;
+        let started = handle_line_at(&store, "nhk", eit, now).unwrap().unwrap();
+        let ArchiveEvent::ProgramStarted(path) = started else {
+            panic!("expected a new archive file")
+        };
+
+        let panic = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            let _guard = store.lock().unwrap();
+            panic!("poison the archive store mutex");
+        }));
+        assert!(panic.is_err());
+        assert!(store.is_poisoned());
+
+        handle_line_at(&store, "nhk", caption, now).unwrap();
+
+        assert!(!store.is_poisoned());
+        assert_eq!(
+            fs::read_to_string(path).unwrap(),
+            format!("{eit}\n{caption}\n")
+        );
+        fs::remove_dir_all(data_dir).unwrap();
+    }
+
+    #[test]
     fn rejects_retention_outside_supported_date_range() {
         let retention = humantime::parse_duration("300000y").unwrap();
 
@@ -645,7 +683,7 @@ mod tests {
         assert_eq!(collect_garbage(&store, retention).unwrap(), 0);
         assert!(path.exists());
 
-        deactivate_stream(&store, "nhk").unwrap();
+        deactivate_stream(&store, "nhk");
 
         assert_eq!(collect_garbage(&store, retention).unwrap(), 1);
         assert!(!path.exists());
@@ -691,7 +729,7 @@ mod tests {
         let eit = r#"{"type":"eit","section":"present","eventId":1}"#;
         let started = handle_line_at(&store, "nhk", eit, now).unwrap().unwrap();
 
-        deactivate_stream(&store, "nhk").unwrap();
+        deactivate_stream(&store, "nhk");
         let result = handle_line_at(
             &store,
             "nhk",

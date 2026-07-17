@@ -239,11 +239,8 @@ async fn run_ingest_once(
         move |stream_name| {
             let store = connect_store.clone();
             async move {
-                tokio::task::block_in_place(|| {
-                    archive::deactivate_stream(&store, &stream_name).with_context(|| {
-                        format!("failed to reset archive state for stream '{stream_name}'")
-                    })
-                })
+                tokio::task::block_in_place(|| archive::deactivate_stream(&store, &stream_name));
+                Ok(())
             }
         },
         move |event| {
