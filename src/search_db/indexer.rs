@@ -17,6 +17,7 @@ use crate::archive::{self, ArchiveStore};
 
 use super::db::{open_and_migrate, search_db_path};
 use super::ingest::{cleanup_index_for_deleted_files, ingest_once, ingest_paths};
+use super::lock::acquire_data_dir_lock;
 
 /// Waits for up to `interval`, waking early if `shutdown` changes or its
 /// sender is dropped. Returns `true` if shutdown was signaled.
@@ -185,10 +186,9 @@ pub(crate) async fn run_archive_maintenance(
 /// all existing JSONL archive files from offset 0. The JSONL archive files are
 /// not modified.
 ///
-/// Do not run this concurrently with a `serve` process against the same
-/// `data_dir`: this deletes and recreates the search database file, which a
-/// running server's reader pool and indexer do not expect.
+/// Fails if another `aribcap-db` process holds the `data_dir` lock.
 pub async fn run_rebuild(data_dir: &Path) -> Result<()> {
+    let _lock = acquire_data_dir_lock(data_dir).await?;
     let db_path = search_db_path(data_dir);
     let archive_root = crate::archive::archive_root(data_dir);
 
@@ -268,5 +268,14 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(programs, 1);
+    }
+
+    #[tokio::test]
+    async fn run_rebuild_refuses_while_data_dir_is_locked() {
+        let data_dir = temp_dir();
+        let _lock = acquire_data_dir_lock(&data_dir).await.unwrap();
+
+        let error = run_rebuild(&data_dir).await.unwrap_err();
+        assert!(error.to_string().contains("held by another"));
     }
 }

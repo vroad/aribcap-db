@@ -46,6 +46,9 @@ pub async fn run(args: ServeArgs) -> Result<()> {
             data_dir.display()
         )
     })?;
+    // Hold the data-directory lock for the lifetime of `run` to prevent
+    // concurrent `serve` or `search-rebuild` processes for the same directory.
+    let _data_dir_lock = search_db::acquire_data_dir_lock(&data_dir).await?;
 
     // -------------------------------------------------------------------------
     // Start ingest and the garbage-collection dry run

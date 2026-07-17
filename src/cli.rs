@@ -75,9 +75,8 @@ pub enum DbCommand {
     #[command(
         about = "Rebuild the SQLite search index from the program archive",
         long_about = "Rebuild the SQLite search index from the program archive.\n\n\
-            Do not run this while `aribcap-db serve` is running against the \
-            same data directory: rebuild deletes and recreates the search \
-            database file, which the running server does not expect."
+            Note: This command fails if the same data directory is locked by \
+            another `aribcap-db` process."
     )]
     SearchRebuild(SearchRebuildArgs),
 }
