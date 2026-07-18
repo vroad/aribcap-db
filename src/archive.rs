@@ -10,6 +10,7 @@ use std::{
 
 use anyhow::{Context, Result};
 use chrono::{DateTime, FixedOffset, NaiveDateTime, TimeZone as _, Utc};
+use futures_util::{Stream, StreamExt as _};
 use serde::Serialize;
 use serde_json::Value;
 
@@ -322,6 +323,116 @@ pub fn archive_root(data_dir: &Path) -> PathBuf {
     data_dir.join(ARCHIVE_DIR)
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum ArchiveWalkTarget {
+    Files,
+    MonthDirectories,
+}
+
+fn archive_walk_error(error: io::Error, operation: &str, path: &Path) -> anyhow::Error {
+    anyhow::Error::new(error).context(format!("failed to {operation} {}", path.display()))
+}
+
+pub(crate) fn walk_archive_paths(
+    root: &Path,
+    target: ArchiveWalkTarget,
+) -> impl Stream<Item = Result<PathBuf>> + '_ {
+    async_stream::stream! {
+        let mut streams = match tokio::fs::read_dir(root).await {
+            Ok(streams) => streams,
+            Err(error) if error.kind() == io::ErrorKind::NotFound => return,
+            Err(error) => {
+                yield Err(archive_walk_error(error, "open archive directory", root));
+                return;
+            }
+        };
+
+        loop {
+            let stream = match streams.next_entry().await {
+                Ok(Some(stream)) => stream,
+                Ok(None) => break,
+                Err(error) => {
+                    yield Err(archive_walk_error(error, "enumerate archive directory", root));
+                    break;
+                }
+            };
+            let stream_path = stream.path();
+            let stream_kind = match stream.file_type().await {
+                Ok(kind) => kind,
+                Err(error) => {
+                    yield Err(archive_walk_error(error, "read archive entry type for", &stream_path));
+                    continue;
+                }
+            };
+            if !stream_kind.is_dir() {
+                continue;
+            }
+            let mut months = match tokio::fs::read_dir(&stream_path).await {
+                Ok(months) => months,
+                Err(error) => {
+                    yield Err(archive_walk_error(error, "open archive directory", &stream_path));
+                    continue;
+                }
+            };
+
+            loop {
+                let month = match months.next_entry().await {
+                    Ok(Some(month)) => month,
+                    Ok(None) => break,
+                    Err(error) => {
+                        yield Err(archive_walk_error(error, "enumerate archive directory", &stream_path));
+                        break;
+                    }
+                };
+                let month_path = month.path();
+                let month_kind = match month.file_type().await {
+                    Ok(kind) => kind,
+                    Err(error) => {
+                        yield Err(archive_walk_error(error, "read archive entry type for", &month_path));
+                        continue;
+                    }
+                };
+                if !month_kind.is_dir() {
+                    continue;
+                }
+                if target == ArchiveWalkTarget::MonthDirectories {
+                    yield Ok(month_path);
+                    continue;
+                }
+                let mut entries = match tokio::fs::read_dir(&month_path).await {
+                    Ok(entries) => entries,
+                    Err(error) => {
+                        yield Err(archive_walk_error(error, "open archive directory", &month_path));
+                        continue;
+                    }
+                };
+
+                loop {
+                    let entry = match entries.next_entry().await {
+                        Ok(Some(entry)) => entry,
+                        Ok(None) => break,
+                        Err(error) => {
+                            yield Err(archive_walk_error(error, "enumerate archive directory", &month_path));
+                            break;
+                        }
+                    };
+                    let path = entry.path();
+                    let kind = match entry.file_type().await {
+                        Ok(kind) => kind,
+                        Err(error) => {
+                            yield Err(archive_walk_error(error, "read archive entry type for", &path));
+                            continue;
+                        }
+                    };
+                    if kind.is_file() {
+                        yield Ok(path);
+                    }
+                }
+            }
+        }
+    }
+}
+
 pub fn list_streams(data_dir: &Path) -> io::Result<Vec<String>> {
     read_dir_names(&archive_root(data_dir), |entry| {
         entry.file_type().is_ok_and(|file_type| file_type.is_dir())
@@ -485,65 +596,43 @@ where
     };
     let mut eligible = 0;
     let root = archive_root(&data_dir);
-    let Ok(mut streams) = tokio::fs::read_dir(&root).await else {
-        return Ok(eligible);
-    };
-
-    while let Some(stream) = streams.next_entry().await? {
-        if !stream.file_type().await?.is_dir() {
+    let paths = walk_archive_paths(&root, ArchiveWalkTarget::Files);
+    futures_util::pin_mut!(paths);
+    while let Some(path) = paths.next().await {
+        let path = path?;
+        if !is_expired(&path, cutoff) {
             continue;
         }
-        let mut months = tokio::fs::read_dir(stream.path()).await?;
-        while let Some(month) = months.next_entry().await? {
-            if !month.file_type().await?.is_dir() {
-                continue;
-            }
-            let mut entries = tokio::fs::read_dir(month.path()).await?;
-            while let Some(entry) = entries.next_entry().await? {
-                let path = entry.path();
-                if !entry.file_type().await?.is_file() || !is_expired(&path, cutoff) {
-                    continue;
-                }
-                if active_paths.contains(&path) {
-                    continue;
-                }
-                on_expired(path).await?;
-                eligible += 1;
-            }
+        if active_paths.contains(&path) {
+            continue;
         }
+        on_expired(path).await?;
+        eligible += 1;
     }
     Ok(eligible)
 }
 
 async fn remove_empty_month_directories(data_dir: &Path) -> Result<()> {
     let root = archive_root(data_dir);
-    let Ok(mut streams) = tokio::fs::read_dir(&root).await else {
-        return Ok(());
-    };
-
-    while let Some(stream) = streams.next_entry().await? {
-        if !stream.file_type().await?.is_dir() {
+    let paths = walk_archive_paths(&root, ArchiveWalkTarget::MonthDirectories);
+    futures_util::pin_mut!(paths);
+    while let Some(path) = paths.next().await {
+        let path = path?;
+        let Some(month) = path.file_name() else {
+            continue;
+        };
+        if !is_month_component(&month.to_string_lossy()) {
             continue;
         }
-        let mut months = tokio::fs::read_dir(stream.path()).await?;
-        while let Some(month) = months.next_entry().await? {
-            if !month.file_type().await?.is_dir()
-                || !is_month_component(&month.file_name().to_string_lossy())
-            {
-                continue;
-            }
-            let path = month.path();
-            match tokio::fs::remove_dir(&path).await {
-                Ok(()) => {}
-                Err(error)
-                    if matches!(
-                        error.kind(),
-                        io::ErrorKind::NotFound | io::ErrorKind::DirectoryNotEmpty
-                    ) => {}
-                Err(error) => {
-                    return Err(error)
-                        .with_context(|| format!("failed to remove {}", path.display()));
-                }
+        match tokio::fs::remove_dir(&path).await {
+            Ok(()) => {}
+            Err(error)
+                if matches!(
+                    error.kind(),
+                    io::ErrorKind::NotFound | io::ErrorKind::DirectoryNotEmpty
+                ) => {}
+            Err(error) => {
+                return Err(error).with_context(|| format!("failed to remove {}", path.display()));
             }
         }
     }
@@ -588,7 +677,78 @@ pub(crate) fn validate_recording_started_at(recording_started_at: &str) -> io::R
 
 #[cfg(test)]
 mod tests {
+    use futures_util::TryStreamExt as _;
+
     use super::*;
+
+    async fn collect_archive_walk(root: &Path, target: ArchiveWalkTarget) -> Result<Vec<PathBuf>> {
+        walk_archive_paths(root, target).try_collect().await
+    }
+
+    #[tokio::test]
+    async fn archive_walk_files_yields_only_regular_files_at_file_depth() {
+        let data_dir = std::env::temp_dir().join(format!(
+            "aribcap-archive-walk-files-test-{}",
+            std::process::id()
+        ));
+        let _ = fs::remove_dir_all(&data_dir);
+        let root = archive_root(&data_dir);
+        let month = root.join("nhk").join("2026-07");
+        fs::create_dir_all(month.join("nested")).unwrap();
+        let first = month.join("first.jsonl");
+        let second = month.join("second.txt");
+        fs::write(&first, "{}\n").unwrap();
+        fs::write(&second, "ignored by consumers, not the walker\n").unwrap();
+        fs::write(root.join("root-file.jsonl"), "{}\n").unwrap();
+        fs::write(root.join("nhk").join("stream-file.jsonl"), "{}\n").unwrap();
+        fs::write(month.join("nested").join("too-deep.jsonl"), "{}\n").unwrap();
+
+        let mut paths = collect_archive_walk(&root, ArchiveWalkTarget::Files)
+            .await
+            .unwrap();
+        paths.sort();
+
+        assert_eq!(paths, vec![first, second]);
+        fs::remove_dir_all(data_dir).unwrap();
+    }
+
+    #[tokio::test]
+    async fn archive_walk_month_directories_stops_at_month_depth() {
+        let data_dir = std::env::temp_dir().join(format!(
+            "aribcap-archive-walk-months-test-{}",
+            std::process::id()
+        ));
+        let _ = fs::remove_dir_all(&data_dir);
+        let root = archive_root(&data_dir);
+        let first = root.join("nhk").join("2026-06");
+        let second = root.join("nhk").join("2026-07");
+        fs::create_dir_all(&first).unwrap();
+        fs::create_dir_all(&second).unwrap();
+        fs::write(first.join("program.jsonl"), "{}\n").unwrap();
+
+        let mut paths = collect_archive_walk(&root, ArchiveWalkTarget::MonthDirectories)
+            .await
+            .unwrap();
+        paths.sort();
+
+        assert_eq!(paths, vec![first, second]);
+        fs::remove_dir_all(data_dir).unwrap();
+    }
+
+    #[tokio::test]
+    async fn archive_walk_missing_root_is_empty() {
+        let root = std::env::temp_dir().join(format!(
+            "aribcap-archive-walk-missing-test-{}",
+            std::process::id()
+        ));
+        let _ = fs::remove_dir_all(&root);
+
+        let paths = collect_archive_walk(&root, ArchiveWalkTarget::Files)
+            .await
+            .unwrap();
+
+        assert!(paths.is_empty());
+    }
 
     #[test]
     fn clearing_dirty_path_preserves_a_newer_generation() {

@@ -1,4 +1,4 @@
-use std::path::{Path, PathBuf};
+use std::path::Path;
 
 use serde_json::Value;
 
@@ -162,40 +162,6 @@ pub(super) fn stream_month_filename(
     }
 
     Some((stream, month, filename))
-}
-
-pub(super) async fn scan_jsonl_files(archive_root: &Path) -> Vec<PathBuf> {
-    let Ok(mut streams) = tokio::fs::read_dir(archive_root).await else {
-        return Vec::new();
-    };
-    let mut paths = Vec::new();
-
-    while let Ok(Some(stream)) = streams.next_entry().await {
-        if !stream.file_type().await.is_ok_and(|kind| kind.is_dir()) {
-            continue;
-        }
-        let Ok(mut months) = tokio::fs::read_dir(stream.path()).await else {
-            continue;
-        };
-        while let Ok(Some(month)) = months.next_entry().await {
-            if !month.file_type().await.is_ok_and(|kind| kind.is_dir()) {
-                continue;
-            }
-            let Ok(mut entries) = tokio::fs::read_dir(month.path()).await else {
-                continue;
-            };
-            while let Ok(Some(entry)) = entries.next_entry().await {
-                let path = entry.path();
-                if entry.file_type().await.is_ok_and(|kind| kind.is_file())
-                    && path.extension().and_then(|ext| ext.to_str()) == Some("jsonl")
-                {
-                    paths.push(path);
-                }
-            }
-        }
-    }
-
-    paths
 }
 
 #[cfg(test)]

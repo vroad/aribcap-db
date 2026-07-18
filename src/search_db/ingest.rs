@@ -1,15 +1,15 @@
 use std::path::{Path, PathBuf};
 
 use anyhow::{Context, Result};
+use futures_util::{Stream, StreamExt as _, stream};
 use serde_json::Value;
 use sqlx::{Connection, SqliteConnection};
 use tokio::io::{AsyncReadExt as _, AsyncSeekExt as _, SeekFrom};
 
-use crate::archive::parse_recording_started_at;
+use crate::archive::{ArchiveWalkTarget, parse_recording_started_at, walk_archive_paths};
 
 use super::record::{
-    CaptionRecord, EitPresent, caption_from_value, eit_present_from_value, scan_jsonl_files,
-    stream_month_filename,
+    CaptionRecord, EitPresent, caption_from_value, eit_present_from_value, stream_month_filename,
 };
 use super::text::search_index_text;
 
@@ -528,14 +528,17 @@ async fn ingest_file(conn: &mut SqliteConnection, archive_root: &Path, path: &Pa
     Ok(())
 }
 
-/// Attempts to index every given path and returns an error if any path fails.
-pub async fn ingest_paths(
+async fn ingest_path_stream<S>(
     conn: &mut SqliteConnection,
     archive_root: &Path,
-    paths: impl IntoIterator<Item = PathBuf>,
-) -> Result<()> {
+    paths: S,
+) -> Result<()>
+where
+    S: Stream<Item = PathBuf>,
+{
     let mut first_error: Option<anyhow::Error> = None;
-    for path in paths {
+    futures_util::pin_mut!(paths);
+    while let Some(path) = paths.next().await {
         // Commit each path independently so that a failure does not roll back paths
         // indexed earlier in the pass.
         let mut tx = match conn.begin().await {
@@ -575,9 +578,31 @@ pub async fn ingest_paths(
     }
 }
 
+/// Attempts to index every given path and returns an error if any path fails.
+pub async fn ingest_paths(
+    conn: &mut SqliteConnection,
+    archive_root: &Path,
+    paths: impl IntoIterator<Item = PathBuf>,
+) -> Result<()> {
+    ingest_path_stream(conn, archive_root, stream::iter(paths)).await
+}
+
 /// Scans `archive_root` and indexes new data in its JSONL archive files.
 pub async fn ingest_once(conn: &mut SqliteConnection, archive_root: &Path) -> Result<()> {
-    ingest_paths(conn, archive_root, scan_jsonl_files(archive_root).await).await
+    let paths =
+        walk_archive_paths(archive_root, ArchiveWalkTarget::Files).filter_map(|result| async {
+            match result {
+                Ok(path) if path.extension().and_then(|ext| ext.to_str()) == Some("jsonl") => {
+                    Some(path)
+                }
+                Ok(_) => None,
+                Err(error) => {
+                    tracing::warn!(%error, "archive search scan failed");
+                    None
+                }
+            }
+        });
+    ingest_path_stream(conn, archive_root, paths).await
 }
 
 /// Deletes the `programs`/`indexed_files` rows for `path`. `ON DELETE

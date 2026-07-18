@@ -16,6 +16,7 @@ path = "src/bin/aribcap-db.rs"
 
 [dependencies]
 anyhow = "1.0"
+async-stream = "0.3"
 anstream = "1.0"
 anstyle = "1.0"
 axum = "0.8"
