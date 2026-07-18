@@ -234,7 +234,7 @@ async fn run_ingest_once(
         move |stream_name| {
             let store = connect_store.clone();
             async move {
-                tokio::task::block_in_place(|| archive::deactivate_stream(&store, &stream_name));
+                archive::deactivate_stream(&store, &stream_name);
                 Ok(())
             }
         },
@@ -243,9 +243,8 @@ async fn run_ingest_once(
             let live_broadcaster = live_broadcaster.clone();
             async move {
                 live_broadcaster.publish(&event.stream_name, &event.line);
-                let archive_event = tokio::task::block_in_place(|| {
-                    archive::handle_line(&store, &event.stream_name, &event.line)
-                })?;
+                let archive_event =
+                    archive::handle_line(&store, &event.stream_name, &event.line)?;
                 match archive_event {
                     Some(ArchiveEvent::ProgramStarted(path)) => tracing::info!(stream = event.stream_name, path = %path.display(), "Program started"),
                     Some(ArchiveEvent::SkippedNoProgram) => tracing::trace!(stream = event.stream_name, "Skipped line before present EIT"),
