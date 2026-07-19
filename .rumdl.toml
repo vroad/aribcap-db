@@ -3,3 +3,4 @@ line-length = 100
 
 [per-file-ignores]
 "docs/mcp.md" = ["MD013"]
+"docs/linting.md" = ["MD013"]

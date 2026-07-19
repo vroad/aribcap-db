@@ -7,8 +7,19 @@ use std::{
     },
 };
 
+use aide::{
+    axum::{
+        ApiRouter,
+        routing::{get, get_with},
+    },
+    generate,
+    openapi::{Info, MediaType, OpenApi, Response as ApiResponse, SchemaObject},
+    operation::OperationOutput,
+    scalar::Scalar,
+    transform::TransformOperation,
+};
 use axum::{
-    Json, Router,
+    Extension, Json, Router,
     body::Body,
     extract::{
         Path, Query, State,
@@ -17,9 +28,9 @@ use axum::{
     http::{Request, StatusCode, header},
     middleware::{self, Next},
     response::{IntoResponse, Response},
-    routing::get,
 };
 use futures_util::stream::unfold;
+use schemars::{JsonSchema, json_schema};
 use serde::{Deserialize, Serialize};
 use tokio::sync::{broadcast, watch};
 use tokio_util::{io::ReaderStream, sync::CancellationToken};
@@ -49,34 +60,211 @@ pub fn router(
     mcp_cancellation: CancellationToken,
 ) -> Router {
     let query_service = ArchiveQueryService::new(data_dir, search_db_path, search_db_ready.clone());
-    let archive_routes = Router::new()
-        .route("/api/streams", get(api_streams))
-        .route("/api/months", get(api_months))
-        .route("/api/programs", get(api_programs))
-        .route("/api/programs/search", get(api_search))
-        .route(
-            "/api/programs/{stream}/{recording_started_at}",
-            get(raw_program),
-        )
-        .route_layer(middleware::from_fn(move |request, next| {
-            require_search_db(search_db_ready.clone(), request, next)
-        }));
-
-    let app = Router::new()
-        .merge(archive_routes)
-        .route("/api/live/{stream}", get(live_stream))
-        .with_state(AppState {
-            query_service: query_service.clone(),
-            live,
-            shutdown,
-        });
+    let app = rest_api_routes(search_db_ready).with_state(AppState {
+        query_service: query_service.clone(),
+        live,
+        shutdown,
+    });
     let app = if mcp_enabled {
         app.merge(mcp::router(query_service, mcp_cancellation))
     } else {
         app
     };
 
-    app.layer(TraceLayer::new_for_http())
+    let app = app
+        .route(
+            "/docs",
+            Scalar::new("/openapi.json")
+                .with_title("aribcap-db HTTP API")
+                .axum_route(),
+        )
+        .route("/openapi.json", get(serve_openapi));
+    let (app, api) = finish_openapi(app);
+
+    app.layer(Extension(Arc::new(api)))
+        .layer(TraceLayer::new_for_http())
+}
+
+fn rest_api_routes(search_db_ready: Arc<AtomicBool>) -> ApiRouter<AppState> {
+    configure_openapi_generation();
+    let archive_routes = ApiRouter::new()
+        .api_route(
+            "/api/streams",
+            get_with(api_streams, |op| {
+                document_operation(
+                    op,
+                    "listStreams",
+                    "List streams",
+                    "List archive stream names that can be searched.",
+                )
+                .response_with::<200, Json<Vec<String>>, _>(|response| {
+                    response.description("Archive stream names.")
+                })
+                .with(document_unavailable_error)
+                .with(document_internal_error)
+            }),
+        )
+        .api_route(
+            "/api/months",
+            get_with(api_months, |op| {
+                document_operation(
+                    op,
+                    "listMonths",
+                    "List months",
+                    "List archive months available for one stream.",
+                )
+                .response_with::<200, Json<Vec<String>>, _>(|response| {
+                    response.description("Archive months in `YYYY-MM` form.")
+                })
+                .with(document_bad_request_error)
+                .with(document_unavailable_error)
+                .with(document_internal_error)
+            }),
+        )
+        .api_route(
+            "/api/programs",
+            get_with(api_programs, |op| {
+                document_operation(
+                    op,
+                    "listPrograms",
+                    "List programs",
+                    "List indexed archived programs for one stream and month.",
+                )
+                .response_with::<200, Json<Vec<archive::ProgramEntry>>, _>(|response| {
+                    response.description("Indexed archived programs.")
+                })
+                .with(document_bad_request_error)
+                .with(document_unavailable_error)
+                .with(document_internal_error)
+            }),
+        )
+        .api_route(
+            "/api/programs/search",
+            get_with(api_search, |op| {
+                document_operation(
+                    op,
+                    "searchPrograms",
+                    "Search programs",
+                    "Search archived program metadata and caption text.",
+                )
+                .response_with::<200, Json<crate::query_service::SearchResponse>, _>(|response| {
+                    response.description("Matching programs and caption hits.")
+                })
+                .with(document_bad_request_error)
+                .with(document_unavailable_error)
+                .with(document_internal_error)
+            }),
+        )
+        .api_route(
+            "/api/programs/{stream}/{recording_started_at}",
+            get_with(raw_program, |op| {
+                document_operation(
+                    op,
+                    "getRawProgram",
+                    "Get raw program",
+                    "Stream the archived program's raw JSONL records.",
+                )
+                .response_with::<200, NdjsonResponse, _>(|response| {
+                    response.description("Raw archived program records.")
+                })
+                .with(document_bad_request_error)
+                .with(document_not_found_error)
+                .with(document_unavailable_error)
+                .with(document_internal_error)
+            }),
+        )
+        .route_layer(middleware::from_fn(move |request, next| {
+            require_search_db(search_db_ready.clone(), request, next)
+        }));
+
+    ApiRouter::new().merge(archive_routes).api_route(
+        "/api/live/{stream}",
+        get_with(live_stream, |op| {
+            document_operation(
+                op,
+                "getLiveStream",
+                "Get live stream",
+                "Stream raw JSONL records received from the existing upstream connection.",
+            )
+            .response_with::<200, NdjsonResponse, _>(|response| {
+                response.description("Live raw JSONL records.")
+            })
+            .with(document_bad_request_error)
+            .with(document_not_found_error)
+        }),
+    )
+}
+
+fn finish_openapi<S>(app: ApiRouter<S>) -> (Router<S>, OpenApi)
+where
+    S: Clone + Send + Sync + 'static,
+{
+    let mut api = OpenApi {
+        info: Info {
+            title: "aribcap-db HTTP API".to_owned(),
+            description: Some(
+                "Read-only archive discovery, search, and JSONL streaming API.".to_owned(),
+            ),
+            version: env!("CARGO_PKG_VERSION").to_owned(),
+            ..Info::default()
+        },
+        ..OpenApi::default()
+    };
+    let app = app.finish_api(&mut api);
+    generate::infer_responses(true);
+
+    (app, api)
+}
+
+#[cfg(test)]
+pub(crate) fn openapi_document() -> OpenApi {
+    let (_, api) = finish_openapi(rest_api_routes(Arc::new(AtomicBool::new(false))));
+    api
+}
+
+fn configure_openapi_generation() {
+    generate::infer_responses(false);
+    #[cfg(test)]
+    generate::on_error(|error| panic!("failed to generate OpenAPI: {error}"));
+    #[cfg(not(test))]
+    generate::on_error(|error| tracing::warn!(%error, "Failed to generate part of OpenAPI"));
+}
+
+async fn serve_openapi(Extension(api): Extension<Arc<OpenApi>>) -> Json<Arc<OpenApi>> {
+    Json(api)
+}
+
+fn document_operation<'a>(
+    op: TransformOperation<'a>,
+    id: &str,
+    summary: &str,
+    description: &str,
+) -> TransformOperation<'a> {
+    op.id(id).summary(summary).description(description)
+}
+
+fn document_bad_request_error(op: TransformOperation<'_>) -> TransformOperation<'_> {
+    op.response_with::<400, Json<ErrorBody>, _>(|response| {
+        response.description("Invalid path or query parameters.")
+    })
+}
+
+fn document_not_found_error(op: TransformOperation<'_>) -> TransformOperation<'_> {
+    op.response_with::<404, Json<ErrorBody>, _>(|response| {
+        response.description("The requested resource was not found.")
+    })
+}
+
+fn document_unavailable_error(op: TransformOperation<'_>) -> TransformOperation<'_> {
+    op.response_with::<503, Json<ErrorBody>, _>(|response| {
+        response.description("The search database is not ready.")
+    })
+}
+
+fn document_internal_error(op: TransformOperation<'_>) -> TransformOperation<'_> {
+    op.response_with::<500, Json<ErrorBody>, _>(|response| {
+        response.description("Internal server error.")
+    })
 }
 
 async fn require_search_db(
@@ -144,9 +332,12 @@ async fn api_search(
 
 async fn raw_program(
     State(state): State<AppState>,
-    path: Result<Path<(String, String)>, PathRejection>,
+    path: Result<Path<RawProgramPath>, PathRejection>,
 ) -> Result<Response, HttpError> {
-    let Path((stream, recording_started_at)) = path?;
+    let Path(RawProgramPath {
+        stream,
+        recording_started_at,
+    }) = path?;
     let path = state
         .query_service
         .resolve_program_path(stream, recording_started_at)
@@ -161,9 +352,9 @@ async fn raw_program(
 
 async fn live_stream(
     State(state): State<AppState>,
-    path: Result<Path<String>, PathRejection>,
+    path: Result<Path<LiveStreamPath>, PathRejection>,
 ) -> Result<Response, HttpError> {
-    let Path(stream) = path?;
+    let Path(LiveStreamPath { stream }) = path?;
     let Some(receiver) = state.live.subscribe(&stream) else {
         return Err(HttpError::not_found("stream not found"));
     };
@@ -211,20 +402,67 @@ async fn live_stream(
         .into_response())
 }
 
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Deserialize, JsonSchema)]
 struct StreamQuery {
+    /// Archive stream name.
     stream: String,
 }
 
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Deserialize, JsonSchema)]
 struct ProgramsQuery {
+    /// Archive stream name.
     stream: String,
+    /// Archive month in `YYYY-MM` form.
     month: String,
 }
 
-#[derive(Debug, Serialize)]
+#[derive(Debug, Deserialize, JsonSchema)]
+struct RawProgramPath {
+    /// Archive stream name.
+    stream: String,
+    /// Recording start timestamp in `YYYY-MM-DD_HH-MM-SS` form.
+    recording_started_at: String,
+}
+
+#[derive(Debug, Deserialize, JsonSchema)]
+struct LiveStreamPath {
+    /// Configured live stream name.
+    stream: String,
+}
+
+#[derive(Debug, Serialize, JsonSchema)]
 struct ErrorBody {
+    /// Client-safe error description.
     error: String,
+}
+
+struct NdjsonResponse;
+
+impl OperationOutput for NdjsonResponse {
+    type Inner = String;
+
+    fn operation_response(
+        _ctx: &mut aide::generate::GenContext,
+        _operation: &mut aide::openapi::Operation,
+    ) -> Option<ApiResponse> {
+        let mut response = ApiResponse {
+            // Callers always override the description below via `.response_with(|r| r.description(...))`.
+            description: String::new(),
+            ..ApiResponse::default()
+        };
+        response.content.insert(
+            "application/x-ndjson".to_owned(),
+            MediaType {
+                schema: Some(SchemaObject {
+                    json_schema: json_schema!({ "type": "string" }),
+                    example: None,
+                    external_docs: None,
+                }),
+                ..MediaType::default()
+            },
+        );
+        Some(response)
+    }
 }
 
 #[derive(Debug)]
@@ -284,6 +522,17 @@ impl IntoResponse for HttpError {
             }),
         )
             .into_response()
+    }
+}
+
+impl OperationOutput for HttpError {
+    type Inner = ErrorBody;
+
+    fn operation_response(
+        ctx: &mut aide::generate::GenContext,
+        operation: &mut aide::openapi::Operation,
+    ) -> Option<ApiResponse> {
+        <Json<ErrorBody> as OperationOutput>::operation_response(ctx, operation)
     }
 }
 
@@ -609,6 +858,66 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn openapi_and_docs_are_available_before_search_db_is_ready() {
+        let data_dir = temp_dir();
+        let app = test_router(
+            data_dir.clone(),
+            Arc::new(LiveBroadcaster::new(["nhk".to_owned()])),
+        );
+
+        let response = get(&app, "/openapi.json").await;
+        assert_eq!(response.status(), StatusCode::OK);
+        assert_eq!(response.headers()[header::CONTENT_TYPE], "application/json");
+        let api: serde_json::Value = serde_json::from_str(&body_text(response).await).unwrap();
+        assert_eq!(api["openapi"], "3.1.0");
+        assert_eq!(api["info"]["title"], "aribcap-db HTTP API");
+        assert_eq!(api["info"]["version"], env!("CARGO_PKG_VERSION"));
+        assert_eq!(api, serde_json::to_value(openapi_document()).unwrap());
+
+        let paths = api["paths"].as_object().unwrap();
+        assert_eq!(paths.len(), 6);
+        for path in [
+            "/api/streams",
+            "/api/months",
+            "/api/programs",
+            "/api/programs/search",
+            "/api/programs/{stream}/{recording_started_at}",
+            "/api/live/{stream}",
+        ] {
+            assert!(paths[path]["get"].is_object(), "missing GET {path}");
+        }
+        for path in ["/openapi.json", "/docs", "/mcp"] {
+            assert!(!paths.contains_key(path));
+        }
+
+        let raw = &paths["/api/programs/{stream}/{recording_started_at}"]["get"];
+        let parameter_names = raw["parameters"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|parameter| parameter["name"].as_str().unwrap())
+            .collect::<Vec<_>>();
+        assert_eq!(parameter_names, ["stream", "recording_started_at"]);
+        assert!(raw["responses"]["200"]["content"]["application/x-ndjson"].is_object());
+        assert!(raw["responses"]["400"].is_object());
+        assert!(raw["responses"]["404"].is_object());
+        assert!(raw["responses"]["503"].is_object());
+        assert!(raw["responses"]["500"].is_object());
+
+        let response = get(&app, "/docs").await;
+        assert_eq!(response.status(), StatusCode::OK);
+        assert!(
+            response.headers()[header::CONTENT_TYPE]
+                .to_str()
+                .unwrap()
+                .starts_with("text/html")
+        );
+        assert!(body_text(response).await.contains("/openapi.json"));
+
+        fs::remove_dir_all(data_dir).unwrap();
+    }
+
+    #[tokio::test]
     async fn mcp_route_is_opt_in_and_exposes_read_only_tools() {
         let (data_dir, disabled_app) = app_with_program().await;
         let response = mcp_post(
@@ -621,6 +930,11 @@ mod tests {
         fs::remove_dir_all(data_dir).unwrap();
 
         let (data_dir, app) = app_with_program_mcp().await;
+        let response = get(&app, "/openapi.json").await;
+        let api: serde_json::Value = serde_json::from_str(&body_text(response).await).unwrap();
+        assert_eq!(api["paths"].as_object().unwrap().len(), 6);
+        assert!(api["paths"].get("/mcp").is_none());
+
         let response = mcp_post(
             &app,
             r#"{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2025-11-25","capabilities":{},"clientInfo":{"name":"test","version":"1.0"}}}"#,

@@ -57,6 +57,10 @@ returns `503 Service Unavailable`.
 See the [HTTP API reference](docs/http-api.md) for request parameters, response
 behavior, program collisions, and live-stream delivery semantics.
 
+While the server is running, an interactive Scalar reference is available at
+`http://<server-address>:40773/docs`, and the generated OpenAPI 3.1 document is
+available at `/openapi.json`.
+
 ## MCP server
 
 Enable the read-only Streamable HTTP MCP server in the configuration:
@@ -111,6 +115,17 @@ Rebuild deletes and recreates the SQLite database; it does not modify archive
 files.
 
 ## Development
+
+The route, parameter, and response tables in `docs/http-api.md` are generated
+from the same OpenAPI document served by the application. After changing an HTTP
+handler or its documentation, update those sections with:
+
+```sh
+UPDATE_HTTP_API_DOCS=1 cargo test http_api_docs
+```
+
+The normal test suite fails with a diff when the committed HTTP or MCP reference
+is stale.
 
 Generated SQLx query metadata is committed under `.sqlx/`, allowing builds and
 tests without setting `DATABASE_URL`. After changing a SQLx-checked query or a
