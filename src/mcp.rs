@@ -81,7 +81,7 @@ impl AribcapMcp {
     }
 
     #[tool(
-        description = "Search archived program titles, descriptions, and caption text. When stream is omitted, all archive streams are searched. Results are ordered by newest program first; caption hits are ordered by their occurrence in the program, not relevance.",
+        description = "Search archived program titles, descriptions, and caption text. `q`, `program_q`, and `line_q` are all optional; when all three are omitted, programs are listed using only the `stream`/`from`/`to`/`genre` filters, with no caption hits. When stream is omitted, all archive streams are searched. Results are ordered by newest program first; caption hits are ordered by their occurrence in the program, not relevance.",
         annotations(
             read_only_hint = true,
             destructive_hint = false,

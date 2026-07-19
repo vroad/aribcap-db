@@ -16,8 +16,8 @@ pub use ingest::{cleanup_index_for_deleted_files, ingest_once, ingest_paths};
 pub(crate) use lock::acquire_data_dir_lock;
 pub use query::{
     CaptionLine, CaptionPage, GenreFilter, IndexedProgram, ProgramDetails, SearchFilter, SearchHit,
-    SearchProgram, find_indexed_program, get_caption_page, list_indexed_programs, search_captions,
-    search_combined, search_general, search_program_metadata,
+    SearchProgram, find_indexed_program, get_caption_page, list_indexed_programs,
+    search_all_programs, search_captions, search_combined, search_general, search_program_metadata,
 };
 pub use text::{
     SearchExpression, expand_from_bound, expand_to_bound, normalize_search_text,

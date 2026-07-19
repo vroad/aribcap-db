@@ -313,6 +313,45 @@ pub async fn search_program_metadata(
         .collect())
 }
 
+/// Lists programs matching only the stream/time/genre filter, with no keyword match.
+pub async fn search_all_programs(
+    conn: &mut SqliteConnection,
+    filter: &SearchFilter<'_>,
+    limit: i64,
+) -> Result<Vec<SearchProgram>> {
+    let sql = format!(
+        r#"
+        SELECT
+            p.id AS program_id, p.stream, p.month, p.filename,
+            p.recording_started_at, p.start_time, p.title, p.description
+        FROM programs p
+        {PROGRAM_FILTER_SQL}
+        ORDER BY p.recording_started_at DESC, p.id DESC
+        LIMIT ?
+        "#
+    );
+    let query = sqlx::query_as::<_, ProgramRow>(AssertSqlSafe(sql));
+    let rows = bind_program_filter(query, filter)
+        .bind(limit)
+        .fetch_all(conn)
+        .await?;
+
+    Ok(rows
+        .into_iter()
+        .map(|row| SearchProgram {
+            program_id: row.program_id,
+            stream: row.stream,
+            month: row.month,
+            filename: row.filename,
+            recording_started_at: row.recording_started_at,
+            start_time: row.start_time,
+            title: row.title,
+            description: row.description,
+            hits: Vec::new(),
+        })
+        .collect())
+}
+
 /// Searches `line_q` in captions within programs whose title or description matches `program_q`.
 pub async fn search_combined(
     conn: &mut SqliteConnection,
@@ -663,6 +702,32 @@ mod tests {
         let results = search_program_metadata(&mut conn, &expression("ニュース"), &filter, 20)
             .await
             .unwrap();
+        assert_eq!(results.len(), 1);
+        assert_eq!(results[0].title, "ニュース");
+        assert!(results[0].hits.is_empty());
+    }
+
+    #[tokio::test]
+    async fn search_all_programs_returns_filtered_programs_without_hits() {
+        let (_data_dir, mut conn) = seed_search_db().await;
+        let filter = SearchFilter::default();
+
+        let results = search_all_programs(&mut conn, &filter, 20).await.unwrap();
+        assert_eq!(results.len(), 2);
+        assert!(results.iter().all(|program| program.hits.is_empty()));
+        assert_eq!(results[0].title, "天気予報");
+        assert_eq!(results[1].title, "ニュース");
+    }
+
+    #[tokio::test]
+    async fn search_all_programs_applies_stream_filter() {
+        let (_data_dir, mut conn) = seed_search_db().await;
+        let filter = SearchFilter {
+            stream: Some("nhk"),
+            ..Default::default()
+        };
+
+        let results = search_all_programs(&mut conn, &filter, 20).await.unwrap();
         assert_eq!(results.len(), 1);
         assert_eq!(results[0].title, "ニュース");
         assert!(results[0].hits.is_empty());

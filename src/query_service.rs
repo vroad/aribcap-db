@@ -88,6 +88,11 @@ pub struct SearchRequest {
     pub program_q: Option<String>,
     /// Search caption text only. May be combined with `program_q`.
     /// Limited to 100 Unicode characters.
+    ///
+    /// When `q`, `program_q`, and `line_q` are all omitted, programs are
+    /// listed using only the `stream`/`from`/`to`/`genre` filters (or all
+    /// programs, if none of those are given either), newest first, with no
+    /// caption hits.
     pub line_q: Option<String>,
     /// Genre filter in `0..15` or `0..15:0..15` form.
     pub genre: Option<String>,
@@ -235,6 +240,7 @@ enum SearchMode {
     Program(search_db::SearchExpression),
     Line(search_db::SearchExpression),
     Combined(search_db::SearchExpression, search_db::SearchExpression),
+    Filter,
 }
 
 impl SearchMode {
@@ -269,9 +275,7 @@ impl SearchMode {
             (None, Some(program_q), Some(line_q)) => {
                 Ok(Self::Combined(parse(program_q)?, parse(line_q)?))
             }
-            (None, None, None) => Err(QueryServiceError::BadRequest(
-                "provide one of `q`, `program_q`, or `line_q`".to_owned(),
-            )),
+            (None, None, None) => Ok(Self::Filter),
         }
     }
 }
@@ -447,6 +451,9 @@ impl ArchiveQueryService {
                     inner_hits,
                 )
                 .await
+            }
+            SearchMode::Filter => {
+                search_db::search_all_programs(&mut connection, &filter, limit).await
             }
         }
         .map_err(QueryServiceError::internal)?;
@@ -647,6 +654,41 @@ mod tests {
             .await
             .unwrap_err();
         assert!(matches!(error, QueryServiceError::BadRequest(_)));
+
+        service.search_pool.close().await;
+        drop(data_dir);
+    }
+
+    #[tokio::test]
+    async fn search_supports_filter_only_and_bare_requests() {
+        let (data_dir, service) = seeded_service(2).await;
+
+        let result = service
+            .search(SearchRequest {
+                stream: Some("nhk".into()),
+                from: Some("2026-07-15".into()),
+                to: Some("2026-07-15".into()),
+                ..Default::default()
+            })
+            .await
+            .unwrap();
+        assert_eq!(result.items.len(), 1);
+        assert_eq!(result.items[0].title, "program title");
+        assert!(result.items[0].hits.is_empty());
+
+        let result = service
+            .search(SearchRequest {
+                stream: Some("other".into()),
+                ..Default::default()
+            })
+            .await
+            .unwrap();
+        assert!(result.items.is_empty());
+
+        let result = service.search(SearchRequest::default()).await.unwrap();
+        assert_eq!(result.items.len(), 1);
+        assert_eq!(result.items[0].title, "program title");
+        assert!(result.items[0].hits.is_empty());
 
         service.search_pool.close().await;
         drop(data_dir);

@@ -72,7 +72,7 @@ Example result:
 <!-- generated: tool search_programs -->
 ### `search_programs`
 
-Search archived program titles, descriptions, and caption text. When stream is omitted, all archive streams are searched. Results are ordered by newest program first; caption hits are ordered by their occurrence in the program, not relevance.
+Search archived program titles, descriptions, and caption text. `q`, `program_q`, and `line_q` are all optional; when all three are omitted, programs are listed using only the `stream`/`from`/`to`/`genre` filters, with no caption hits. When stream is omitted, all archive streams are searched. Results are ordered by newest program first; caption hits are ordered by their occurrence in the program, not relevance.
 
 Arguments:
 
@@ -80,7 +80,7 @@ Arguments:
 | --- | --- | --- | --- |
 | `q` | string | no | Search program metadata and caption text with one expression. Limited to 100 Unicode characters. |
 | `program_q` | string | no | Search program titles and descriptions only. May be combined with `line_q`. Limited to 100 Unicode characters. |
-| `line_q` | string | no | Search caption text only. May be combined with `program_q`. Limited to 100 Unicode characters. |
+| `line_q` | string | no | Search caption text only. May be combined with `program_q`. Limited to 100 Unicode characters.  When `q`, `program_q`, and `line_q` are all omitted, programs are listed using only the `stream`/`from`/`to`/`genre` filters (or all programs, if none of those are given either), newest first, with no caption hits. |
 | `genre` | string | no | Genre filter in `0..15` or `0..15:0..15` form. |
 | `stream` | string | no | Restrict results to one archive stream. When omitted, null, or empty, search all streams. |
 | `from` | string | no | Inclusive lower recording-time bound in `YYYY-MM-DD` or `YYYY-MM-DD_HH-MM-SS` form. A date-only value expands to `YYYY-MM-DD_00-00-00`. Must not be later than `to` when both are provided. |

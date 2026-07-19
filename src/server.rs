@@ -145,7 +145,7 @@ fn rest_api_routes(search_db_ready: Arc<AtomicBool>) -> ApiRouter<AppState> {
                     op,
                     "searchPrograms",
                     "Search programs",
-                    "Search archived program metadata and caption text.",
+                    "Search archived program metadata and caption text. `q`, `program_q`, and `line_q` are all optional; when all three are omitted, programs are listed using only the `stream`/`from`/`to`/`genre` filters, with no caption hits.",
                 )
                 .response_with::<200, Json<crate::query_service::SearchResponse>, _>(|response| {
                     response.description("Matching programs and caption hits.")
@@ -797,7 +797,10 @@ mod tests {
             StatusCode::BAD_REQUEST,
         )
         .await;
-        assert_json_error(&app, "/api/programs/search", StatusCode::BAD_REQUEST).await;
+        let response = get(&app, "/api/programs/search").await;
+        assert_eq!(response.status(), StatusCode::OK);
+        let search: serde_json::Value = serde_json::from_str(&body_text(response).await).unwrap();
+        assert_eq!(search["items"].as_array().unwrap().len(), 0);
         for uri in [
             "/api/programs/search?q=caption&from=2026-13-45",
             "/api/programs/search?q=caption&to=2026-07-15_24-00-00",
