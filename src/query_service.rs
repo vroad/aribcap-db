@@ -19,6 +19,7 @@ const DEFAULT_INNER_HITS: i64 = 5;
 const MAX_INNER_HITS: i64 = 50;
 const DEFAULT_CAPTION_LIMIT: i64 = 100;
 const MAX_CAPTION_LIMIT: i64 = 500;
+const MAX_SEARCH_EXPRESSION_CHARS: usize = 100;
 
 #[derive(Debug)]
 pub enum QueryServiceError {
@@ -77,19 +78,24 @@ impl From<io::Error> for QueryServiceError {
 }
 
 #[derive(Debug, Clone, Default, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
 pub struct SearchRequest {
     /// Search program metadata and caption text with one expression.
+    /// Limited to 100 Unicode characters.
     pub q: Option<String>,
     /// Search program titles and descriptions only. May be combined with `line_q`.
+    /// Limited to 100 Unicode characters.
     pub program_q: Option<String>,
     /// Search caption text only. May be combined with `program_q`.
+    /// Limited to 100 Unicode characters.
     pub line_q: Option<String>,
     /// Genre filter in `0..15` or `0..15:0..15` form.
     pub genre: Option<String>,
-    /// Restrict results to one archive stream. When omitted, search all streams.
+    /// Restrict results to one archive stream. When omitted, null, or empty, search all streams.
     pub stream: Option<String>,
     /// Inclusive lower recording-time bound in `YYYY-MM-DD` or `YYYY-MM-DD_HH-MM-SS` form.
     /// A date-only value expands to `YYYY-MM-DD_00-00-00`.
+    /// Must not be later than `to` when both are provided.
     pub from: Option<String>,
     /// Inclusive upper recording-time bound in `YYYY-MM-DD` or `YYYY-MM-DD_HH-MM-SS` form.
     /// A date-only value expands to `YYYY-MM-DD_23-59-59`.
@@ -233,6 +239,18 @@ enum SearchMode {
 
 impl SearchMode {
     fn resolve(query: &SearchRequest) -> Result<Self, QueryServiceError> {
+        for (name, value) in [
+            ("q", query.q.as_deref()),
+            ("program_q", query.program_q.as_deref()),
+            ("line_q", query.line_q.as_deref()),
+        ] {
+            if value.is_some_and(|value| value.chars().count() > MAX_SEARCH_EXPRESSION_CHARS) {
+                return Err(QueryServiceError::BadRequest(format!(
+                    "`{name}` must be at most {MAX_SEARCH_EXPRESSION_CHARS} characters"
+                )));
+            }
+        }
+
         let q = non_empty(query.q.as_deref());
         let program_q = non_empty(query.program_q.as_deref());
         let line_q = non_empty(query.line_q.as_deref());
@@ -373,12 +391,25 @@ impl ArchiveQueryService {
             .inner_hits
             .unwrap_or(DEFAULT_INNER_HITS)
             .clamp(1, MAX_INNER_HITS);
-        let stream = non_empty(query.stream.as_deref()).map(str::to_owned);
+        let stream = non_empty_str(query.stream.as_deref()).map(str::to_owned);
         if let Some(stream) = &stream {
             archive::validate_stream_component(stream).map_err(QueryServiceError::from)?;
         }
-        let from = non_empty(query.from.as_deref()).map(search_db::expand_from_bound);
-        let to = non_empty(query.to.as_deref()).map(search_db::expand_to_bound);
+        let from = non_empty_str(query.from.as_deref())
+            .map(search_db::expand_from_bound)
+            .transpose()
+            .map_err(|message| QueryServiceError::BadRequest(message.to_owned()))?;
+        let to = non_empty_str(query.to.as_deref())
+            .map(search_db::expand_to_bound)
+            .transpose()
+            .map_err(|message| QueryServiceError::BadRequest(message.to_owned()))?;
+        if let (Some(from), Some(to)) = (&from, &to)
+            && from > to
+        {
+            return Err(QueryServiceError::BadRequest(
+                "`from` must not be later than `to`".to_owned(),
+            ));
+        }
         let genre = parse_genre_filter(query.genre.as_deref())?;
         let mode = SearchMode::resolve(&query)?;
 
@@ -499,10 +530,14 @@ fn non_empty(value: Option<&str>) -> Option<&str> {
     value.map(str::trim).filter(|value| !value.is_empty())
 }
 
+fn non_empty_str(value: Option<&str>) -> Option<&str> {
+    value.filter(|value| !value.is_empty())
+}
+
 fn parse_genre_filter(
     value: Option<&str>,
 ) -> Result<Option<search_db::GenreFilter>, QueryServiceError> {
-    let Some(value) = non_empty(value) else {
+    let Some(value) = non_empty_str(value) else {
         return Ok(None);
     };
     let (level1, level2) = match value.split_once(':') {
@@ -613,6 +648,123 @@ mod tests {
             .await
             .unwrap_err();
         assert!(matches!(error, QueryServiceError::BadRequest(_)));
+
+        service.search_pool.close().await;
+        fs::remove_dir_all(data_dir).unwrap();
+    }
+
+    #[tokio::test]
+    async fn search_validates_stream_time_bounds_and_expression_lengths() {
+        let (data_dir, service) = seeded_service(2).await;
+
+        for stream in [None, Some("")] {
+            let result = service
+                .search(SearchRequest {
+                    q: Some("caption".into()),
+                    stream: stream.map(str::to_owned),
+                    ..Default::default()
+                })
+                .await
+                .unwrap();
+            assert_eq!(result.items.len(), 1);
+        }
+        for stream in [" ", " nhk "] {
+            let result = service
+                .search(SearchRequest {
+                    q: Some("caption".into()),
+                    stream: Some(stream.into()),
+                    ..Default::default()
+                })
+                .await
+                .unwrap();
+            assert!(result.items.is_empty());
+        }
+
+        for (from, to) in [
+            (Some(""), Some("")),
+            (Some("2024-02-29"), None),
+            (None, Some("2026-07-15_12-00-00")),
+        ] {
+            service
+                .search(SearchRequest {
+                    q: Some("caption".into()),
+                    from: from.map(str::to_owned),
+                    to: to.map(str::to_owned),
+                    ..Default::default()
+                })
+                .await
+                .unwrap();
+        }
+
+        for request in [
+            SearchRequest {
+                q: Some("caption".into()),
+                from: Some("2026-13-45".into()),
+                ..Default::default()
+            },
+            SearchRequest {
+                q: Some("caption".into()),
+                to: Some("2026-07-15_24-00-00".into()),
+                ..Default::default()
+            },
+            SearchRequest {
+                q: Some("caption".into()),
+                from: Some("2026-07-16".into()),
+                to: Some("2026-07-15".into()),
+                ..Default::default()
+            },
+            SearchRequest {
+                q: Some("caption".into()),
+                from: Some(" ".into()),
+                ..Default::default()
+            },
+            SearchRequest {
+                q: Some("caption".into()),
+                from: Some(" 2026-07-15 ".into()),
+                ..Default::default()
+            },
+            SearchRequest {
+                q: Some("caption".into()),
+                genre: Some(" ".into()),
+                ..Default::default()
+            },
+        ] {
+            let error = service.search(request).await.unwrap_err();
+            assert!(matches!(error, QueryServiceError::BadRequest(_)));
+        }
+
+        let hundred_chars = "字".repeat(100);
+        let hundred_one_chars = "字".repeat(101);
+        service
+            .search(SearchRequest {
+                program_q: Some(hundred_chars.clone()),
+                line_q: Some(hundred_chars.clone()),
+                ..Default::default()
+            })
+            .await
+            .unwrap();
+        for field in ["q", "program_q", "line_q"] {
+            let mut accepted = SearchRequest::default();
+            let mut rejected = SearchRequest::default();
+            match field {
+                "q" => {
+                    accepted.q = Some(hundred_chars.clone());
+                    rejected.q = Some(hundred_one_chars.clone());
+                }
+                "program_q" => {
+                    accepted.program_q = Some(hundred_chars.clone());
+                    rejected.program_q = Some(hundred_one_chars.clone());
+                }
+                "line_q" => {
+                    accepted.line_q = Some(hundred_chars.clone());
+                    rejected.line_q = Some(hundred_one_chars.clone());
+                }
+                _ => unreachable!(),
+            }
+            service.search(accepted).await.unwrap();
+            let error = service.search(rejected).await.unwrap_err();
+            assert!(matches!(error, QueryServiceError::BadRequest(_)));
+        }
 
         service.search_pool.close().await;
         fs::remove_dir_all(data_dir).unwrap();

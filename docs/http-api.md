@@ -106,8 +106,16 @@ Responses:
 
 <!-- generated: http GET /api/programs end -->
 
-Returns programs for the selected stream and month. Each entry includes its API
-path, stream, month, complete filename, and indexed file size.
+Returns programs for the selected stream and month. `month` uses `YYYY-MM`
+format with a month from `01` through `12`.
+
+Each entry contains the following fields:
+
+- `path`: API path for the program
+- `stream`: archive stream name
+- `month`: archive month
+- `filename`: complete archive filename
+- `size_bytes`: indexed file size
 
 `size_bytes` is the file size captured by the background indexer, not a live
 filesystem measurement. While a recording is growing, the value may lag behind
@@ -168,12 +176,12 @@ Parameters:
 
 | Name | Location | Type | Required | Description |
 | --- | --- | --- | --- | --- |
-| `q` | query | string | no | Search program metadata and caption text with one expression. |
-| `program_q` | query | string | no | Search program titles and descriptions only. May be combined with `line_q`. |
-| `line_q` | query | string | no | Search caption text only. May be combined with `program_q`. |
+| `q` | query | string | no | Search program metadata and caption text with one expression. Limited to 100 Unicode characters. |
+| `program_q` | query | string | no | Search program titles and descriptions only. May be combined with `line_q`. Limited to 100 Unicode characters. |
+| `line_q` | query | string | no | Search caption text only. May be combined with `program_q`. Limited to 100 Unicode characters. |
 | `genre` | query | string | no | Genre filter in `0..15` or `0..15:0..15` form. |
-| `stream` | query | string | no | Restrict results to one archive stream. When omitted, search all streams. |
-| `from` | query | string | no | Inclusive lower recording-time bound in `YYYY-MM-DD` or `YYYY-MM-DD_HH-MM-SS` form. A date-only value expands to `YYYY-MM-DD_00-00-00`. |
+| `stream` | query | string | no | Restrict results to one archive stream. When omitted, null, or empty, search all streams. |
+| `from` | query | string | no | Inclusive lower recording-time bound in `YYYY-MM-DD` or `YYYY-MM-DD_HH-MM-SS` form. A date-only value expands to `YYYY-MM-DD_00-00-00`. Must not be later than `to` when both are provided. |
 | `to` | query | string | no | Inclusive upper recording-time bound in `YYYY-MM-DD` or `YYYY-MM-DD_HH-MM-SS` form. A date-only value expands to `YYYY-MM-DD_23-59-59`. |
 | `limit` | query | integer | no | Maximum programs to return. Defaults to 20 and is clamped to `1..200`. |
 | `inner_hits` | query | integer | no | Maximum caption hits per program. Defaults to 5 and is clamped to `1..50`. |
@@ -199,8 +207,12 @@ Use one of the following query forms:
 Search expressions support `AND` and `OR`. The following parameters further
 control the results:
 
-- `stream` restricts results to one stream. If omitted, all streams are searched.
-- `from` and `to` restrict results by recording time.
+- `q`, `program_q`, and `line_q` are each limited to 100 Unicode characters.
+- `stream` restricts results to one stream. If omitted or empty, all streams are
+  searched.
+- `from` and `to` restrict results by recording time. They accept
+  `YYYY-MM-DD` or `YYYY-MM-DD_HH-MM-SS`.
+- `from` must not be later than `to`.
 - `genre` accepts `0..15` or `0..15:0..15`.
 - `limit` controls the number of programs and is clamped to `1..200`.
 - `inner_hits` controls caption hits per program and is clamped to `1..50`.
@@ -243,6 +255,7 @@ buffered lines without blocking ingest or other subscribers.
 ## Errors
 
 - Invalid path or query values return `400 Bad Request`.
+- Undocumented query parameters return `400 Bad Request` on every endpoint.
 - Unknown live streams and missing raw programs return `404 Not Found`.
 - Endpoints other than `/api/live` return `503 Service Unavailable` until the
   search database migrations finish.

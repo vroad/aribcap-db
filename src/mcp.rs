@@ -22,6 +22,11 @@ use crate::query_service::{
 const MCP_SESSION_IDLE_TIMEOUT: Duration = Duration::from_secs(60 * 60);
 
 #[derive(Debug, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+struct EmptyToolArguments {}
+
+#[derive(Debug, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
 pub struct GetProgramCaptionsRequest {
     /// Archive stream name, such as `nhk`.
     pub stream: String,
@@ -64,7 +69,10 @@ impl AribcapMcp {
             open_world_hint = false
         )
     )]
-    async fn list_streams(&self) -> Result<Json<ListStreamsResponse>, String> {
+    async fn list_streams(
+        &self,
+        Parameters(EmptyToolArguments {}): Parameters<EmptyToolArguments>,
+    ) -> Result<Json<ListStreamsResponse>, String> {
         self.query_service
             .list_streams()
             .await
@@ -189,7 +197,10 @@ mod tests {
             Arc::new(AtomicBool::new(false)),
         );
 
-        let error = match AribcapMcp::new(service).list_streams().await {
+        let error = match AribcapMcp::new(service)
+            .list_streams(Parameters(EmptyToolArguments {}))
+            .await
+        {
             Ok(_) => panic!("list_streams should fail while the database is not ready"),
             Err(error) => error,
         };
