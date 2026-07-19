@@ -78,12 +78,12 @@ Arguments:
 
 | Name | Type | Required | Description |
 | --- | --- | --- | --- |
-| `q` | string | no | Search program metadata and caption text with one expression. |
-| `program_q` | string | no | Search program titles and descriptions only. May be combined with `line_q`. |
-| `line_q` | string | no | Search caption text only. May be combined with `program_q`. |
+| `q` | string | no | Search program metadata and caption text with one expression. Limited to 100 Unicode characters. |
+| `program_q` | string | no | Search program titles and descriptions only. May be combined with `line_q`. Limited to 100 Unicode characters. |
+| `line_q` | string | no | Search caption text only. May be combined with `program_q`. Limited to 100 Unicode characters. |
 | `genre` | string | no | Genre filter in `0..15` or `0..15:0..15` form. |
-| `stream` | string | no | Restrict results to one archive stream. When omitted, search all streams. |
-| `from` | string | no | Inclusive lower recording-time bound in `YYYY-MM-DD` or `YYYY-MM-DD_HH-MM-SS` form. A date-only value expands to `YYYY-MM-DD_00-00-00`. |
+| `stream` | string | no | Restrict results to one archive stream. When omitted, null, or empty, search all streams. |
+| `from` | string | no | Inclusive lower recording-time bound in `YYYY-MM-DD` or `YYYY-MM-DD_HH-MM-SS` form. A date-only value expands to `YYYY-MM-DD_00-00-00`. Must not be later than `to` when both are provided. |
 | `to` | string | no | Inclusive upper recording-time bound in `YYYY-MM-DD` or `YYYY-MM-DD_HH-MM-SS` form. A date-only value expands to `YYYY-MM-DD_23-59-59`. |
 | `limit` | integer | no | Maximum programs to return. Defaults to 20 and is clamped to `1..200`. |
 | `inner_hits` | integer | no | Maximum caption hits per program. Defaults to 5 and is clamped to `1..50`. |
@@ -234,9 +234,14 @@ database is being prepared. During that period, calls to data tools fail with:
 search database is not ready
 ```
 
-Invalid arguments, an unavailable search database, and a missing program are
-reported as tool errors. Unexpected filesystem or database failures are logged
-by the server and reported to the client as `internal query error`.
+Tool errors are reported as follows:
+
+- Invalid arguments are reported as tool errors.
+- An unavailable search database is reported as a tool error.
+- A missing program is reported as a tool error.
+- Unexpected filesystem or database failures are logged by the server and
+  reported to the client as `internal query error`.
+- Argument names not listed for a tool are rejected.
 
 The initial archive scan continues in the background after the database is
 ready, so tool results can be partial during that scan.

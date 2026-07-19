@@ -9,7 +9,7 @@ use std::{
 };
 
 use anyhow::{Context, Result};
-use chrono::{DateTime, FixedOffset, NaiveDateTime, TimeZone as _, Utc};
+use chrono::{DateTime, FixedOffset, NaiveDate, NaiveDateTime, TimeZone as _, Utc};
 use futures_util::{Stream, StreamExt as _};
 use schemars::JsonSchema;
 use serde::Serialize;
@@ -534,10 +534,21 @@ pub(crate) fn validate_month_component(month: &str) -> io::Result<()> {
 }
 
 fn is_month_component(month: &str) -> bool {
-    month.len() == 7
-        && month.as_bytes()[4] == b'-'
-        && month[..4].bytes().all(|byte| byte.is_ascii_digit())
-        && month[5..].bytes().all(|byte| byte.is_ascii_digit())
+    matches_digit_shape(month, 7, &[(4, b'-')])
+        && NaiveDate::parse_from_str(&format!("{month}-01"), "%Y-%m-%d").is_ok()
+}
+
+/// Checks that `input` has the expected byte length, with ASCII digits except
+/// for the specified separators. Unlike chrono, this rejects signed or
+/// non-zero-padded dates such as `+026-07-01` and `2026-7-1`.
+pub(crate) fn matches_digit_shape(input: &str, len: usize, separators: &[(usize, u8)]) -> bool {
+    input.len() == len
+        && input.bytes().enumerate().all(|(index, byte)| {
+            separators
+                .iter()
+                .find(|&&(separator_index, _)| separator_index == index)
+                .map_or(byte.is_ascii_digit(), |&(_, separator)| byte == separator)
+        })
 }
 
 /// Checks that `retention` can be represented as an archive cutoff date.
@@ -1010,5 +1021,19 @@ mod tests {
                 .kind(),
             io::ErrorKind::InvalidInput
         );
+    }
+
+    #[test]
+    fn month_components_must_be_real_calendar_months() {
+        for month in ["2026-01", "2026-12"] {
+            validate_month_component(month).unwrap();
+        }
+        for month in ["2026-00", "2026-13", "2026-1", "2026-aa"] {
+            assert_eq!(
+                validate_month_component(month).unwrap_err().kind(),
+                io::ErrorKind::InvalidInput,
+                "accepted {month:?}"
+            );
+        }
     }
 }

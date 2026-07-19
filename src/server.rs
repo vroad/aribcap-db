@@ -282,7 +282,11 @@ async fn require_search_db(
     next.run(request).await
 }
 
-async fn api_streams(State(state): State<AppState>) -> Result<Json<Vec<String>>, HttpError> {
+async fn api_streams(
+    State(state): State<AppState>,
+    query: Result<Query<NoQuery>, QueryRejection>,
+) -> Result<Json<Vec<String>>, HttpError> {
+    let Query(NoQuery {}) = query?;
     state
         .query_service
         .list_streams()
@@ -333,7 +337,9 @@ async fn api_search(
 async fn raw_program(
     State(state): State<AppState>,
     path: Result<Path<RawProgramPath>, PathRejection>,
+    query: Result<Query<NoQuery>, QueryRejection>,
 ) -> Result<Response, HttpError> {
+    let Query(NoQuery {}) = query?;
     let Path(RawProgramPath {
         stream,
         recording_started_at,
@@ -353,7 +359,9 @@ async fn raw_program(
 async fn live_stream(
     State(state): State<AppState>,
     path: Result<Path<LiveStreamPath>, PathRejection>,
+    query: Result<Query<NoQuery>, QueryRejection>,
 ) -> Result<Response, HttpError> {
+    let Query(NoQuery {}) = query?;
     let Path(LiveStreamPath { stream }) = path?;
     let Some(receiver) = state.live.subscribe(&stream) else {
         return Err(HttpError::not_found("stream not found"));
@@ -403,12 +411,18 @@ async fn live_stream(
 }
 
 #[derive(Debug, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+struct NoQuery {}
+
+#[derive(Debug, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
 struct StreamQuery {
     /// Archive stream name.
     stream: String,
 }
 
 #[derive(Debug, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
 struct ProgramsQuery {
     /// Archive stream name.
     stream: String,
@@ -634,6 +648,21 @@ mod tests {
         assert_eq!(search["items"].as_array().unwrap().len(), 1);
         assert_eq!(search["items"][0]["stream"], "nhk");
 
+        let response = get(&app, "/api/programs/search?q=caption&stream=").await;
+        let search: serde_json::Value = serde_json::from_str(&body_text(response).await).unwrap();
+        assert_eq!(search["items"].as_array().unwrap().len(), 2);
+
+        for stream in ["%20", "%20nhk%20"] {
+            let response = get(
+                &app,
+                &format!("/api/programs/search?q=caption&stream={stream}"),
+            )
+            .await;
+            let search: serde_json::Value =
+                serde_json::from_str(&body_text(response).await).unwrap();
+            assert!(search["items"].as_array().unwrap().is_empty());
+        }
+
         let response = mcp_post(
             &app,
             r#"{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2025-11-25","capabilities":{},"clientInfo":{"name":"test","version":"1.0"}}}"#,
@@ -670,6 +699,36 @@ mod tests {
             .map(|item| item["stream"].as_str().unwrap())
             .collect::<Vec<_>>();
         assert_eq!(streams, ["bs", "nhk"]);
+
+        for (id, stream, expected_len) in [
+            (3, None, 2),
+            (4, Some(""), 2),
+            (5, Some(" "), 0),
+            (6, Some(" nhk "), 0),
+        ] {
+            let stream = stream.map_or(serde_json::Value::Null, |stream| {
+                serde_json::Value::String(stream.to_owned())
+            });
+            let body = serde_json::json!({
+                "jsonrpc": "2.0",
+                "id": id,
+                "method": "tools/call",
+                "params": {
+                    "name": "search_programs",
+                    "arguments": {"q": "caption", "stream": stream},
+                },
+            })
+            .to_string();
+            let response = mcp_post(&app, &body, Some(&session_id)).await;
+            let result = sse_json(&body_text(response).await);
+            assert_eq!(
+                result["result"]["structuredContent"]["items"]
+                    .as_array()
+                    .unwrap()
+                    .len(),
+                expected_len
+            );
+        }
 
         fs::remove_dir_all(data_dir).unwrap();
     }
@@ -715,6 +774,14 @@ mod tests {
         assert_json_error(&app, "/api/programs?stream=nhk", StatusCode::BAD_REQUEST).await;
         let response = get(&app, "/api/programs?stream=..&month=2020-01").await;
         assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+        for month in ["2020-00", "2020-13"] {
+            assert_json_error(
+                &app,
+                &format!("/api/programs?stream=nhk&month={month}"),
+                StatusCode::BAD_REQUEST,
+            )
+            .await;
+        }
 
         let response = get(&app, "/api/programs/nhk/2020-01-01_00-00-00").await;
         assert_eq!(response.status(), StatusCode::NOT_FOUND);
@@ -733,8 +800,35 @@ mod tests {
         )
         .await;
         assert_json_error(&app, "/api/programs/search", StatusCode::BAD_REQUEST).await;
+        for uri in [
+            "/api/programs/search?q=caption&from=2026-13-45",
+            "/api/programs/search?q=caption&to=2026-07-15_24-00-00",
+            "/api/programs/search?q=caption&from=2026-07-16&to=2026-07-15",
+        ] {
+            assert_json_error(&app, uri, StatusCode::BAD_REQUEST).await;
+        }
+        let oversized_query = format!("/api/programs/search?q={}", "a".repeat(101));
+        assert_json_error(&app, &oversized_query, StatusCode::BAD_REQUEST).await;
 
         assert_json_error(&app, "/api/live/%FF", StatusCode::BAD_REQUEST).await;
+
+        fs::remove_dir_all(data_dir).unwrap();
+    }
+
+    #[tokio::test]
+    async fn all_http_routes_reject_unknown_query_parameters() {
+        let (data_dir, app) = app_with_program().await;
+
+        for uri in [
+            "/api/streams?unexpected=1",
+            "/api/months?stream=nhk&unexpected=1",
+            "/api/programs?stream=nhk&month=2020-01&unexpected=1",
+            "/api/programs/search?q=caption&unexpected=1",
+            "/api/programs/nhk/2020-01-01_00-00-00?unexpected=1",
+            "/api/live/nhk?unexpected=1",
+        ] {
+            assert_json_error(&app, uri, StatusCode::BAD_REQUEST).await;
+        }
 
         fs::remove_dir_all(data_dir).unwrap();
     }
@@ -966,15 +1060,25 @@ mod tests {
         let tools = sse_json(&body_text(response).await);
         let tools = tools["result"]["tools"].as_array().unwrap();
         assert_eq!(tools.len(), 3);
+
+        for tool in tools {
+            assert_eq!(tool["annotations"]["readOnlyHint"], true, "tool {tool}");
+            assert_eq!(tool["annotations"]["idempotentHint"], true, "tool {tool}");
+            assert_eq!(
+                tool["inputSchema"]["additionalProperties"], false,
+                "tool {tool}"
+            );
+        }
         for name in ["list_streams", "search_programs", "get_program_captions"] {
-            let tool = tools.iter().find(|tool| tool["name"] == name).unwrap();
-            assert_eq!(tool["annotations"]["readOnlyHint"], true);
-            assert_eq!(tool["annotations"]["idempotentHint"], true);
+            assert!(
+                tools.iter().any(|tool| tool["name"] == name),
+                "missing tool {name}"
+            );
         }
 
         let response = mcp_post(
             &app,
-            r#"{"jsonrpc":"2.0","id":3,"method":"tools/call","params":{"name":"list_streams","arguments":{}}}"#,
+            r#"{"jsonrpc":"2.0","id":3,"method":"tools/call","params":{"name":"list_streams"}}"#,
             Some(&session_id),
         )
         .await;
@@ -1006,6 +1110,62 @@ mod tests {
         assert_eq!(output["captions"][0]["durationMs"], 500);
         assert_eq!(output["nextStartLine"], 3);
 
+        for (id, name, arguments) in [
+            (10, "list_streams", r#"{"unexpected":1}"#),
+            (11, "search_programs", r#"{"q":"caption","unexpected":1}"#),
+            (
+                12,
+                "get_program_captions",
+                r#"{"stream":"nhk","recording_started_at":"2020-01-01_00-00-00","unexpected":1}"#,
+            ),
+        ] {
+            let arguments: serde_json::Value = serde_json::from_str(arguments).unwrap();
+            let body = serde_json::json!({
+                "jsonrpc": "2.0",
+                "id": id,
+                "method": "tools/call",
+                "params": {"name": name, "arguments": arguments},
+            })
+            .to_string();
+            let response = mcp_post(&app, &body, Some(&session_id)).await;
+            let error = sse_json(&body_text(response).await);
+            assert_eq!(error["result"]["isError"], true, "tool {name}");
+            assert!(
+                error["result"]["content"][0]["text"]
+                    .as_str()
+                    .unwrap()
+                    .contains("unknown field"),
+                "tool {name}: {error}"
+            );
+        }
+
+        for (id, arguments) in [
+            (
+                20,
+                serde_json::json!({"q": "caption", "from": "2026-13-45"}),
+            ),
+            (
+                21,
+                serde_json::json!({
+                    "q": "caption",
+                    "from": "2026-07-16",
+                    "to": "2026-07-15",
+                }),
+            ),
+            (22, serde_json::json!({"q": "a".repeat(101)})),
+        ] {
+            let body = serde_json::json!({
+                "jsonrpc": "2.0",
+                "id": id,
+                "method": "tools/call",
+                "params": {"name": "search_programs", "arguments": arguments},
+            })
+            .to_string();
+            let response = mcp_post(&app, &body, Some(&session_id)).await;
+            let error = sse_json(&body_text(response).await);
+            assert_eq!(error["result"]["isError"], true, "request {id}");
+        }
+
         fs::remove_dir_all(data_dir).unwrap();
     }
 
@@ -1016,7 +1176,7 @@ mod tests {
             .unwrap()
     }
 
-    async fn mcp_post(app: &Router, body: &'static str, session_id: Option<&str>) -> Response {
+    async fn mcp_post(app: &Router, body: &str, session_id: Option<&str>) -> Response {
         let mut request = Request::builder()
             .method("POST")
             .uri("/mcp")
@@ -1027,7 +1187,7 @@ mod tests {
             request = request.header("mcp-session-id", session_id);
         }
         app.clone()
-            .oneshot(request.body(Body::from(body)).unwrap())
+            .oneshot(request.body(Body::from(body.to_owned())).unwrap())
             .await
             .unwrap()
     }

@@ -1,4 +1,8 @@
+use chrono::{NaiveDate, NaiveDateTime};
 use unicode_normalization::UnicodeNormalization as _;
+
+const DATE_FORMAT: &str = "%Y-%m-%d";
+const DATE_TIME_FORMAT: &str = "%Y-%m-%d_%H-%M-%S";
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct SearchExpression {
@@ -93,22 +97,38 @@ pub fn parse_search_expression(input: &str) -> Result<SearchExpression, &'static
 }
 
 /// Expands a date-only lower bound to the start of that day.
-/// Values that already include a time pass through unchanged.
-pub fn expand_from_bound(input: &str) -> String {
-    if input.len() == 10 {
-        format!("{input}_00-00-00")
-    } else {
-        input.to_owned()
-    }
+/// Valid values that already include a time pass through unchanged.
+pub fn expand_from_bound(input: &str) -> Result<String, &'static str> {
+    expand_bound(input, "00-00-00").ok_or("`from` must be `YYYY-MM-DD` or `YYYY-MM-DD_HH-MM-SS`")
 }
 
 /// Expands a date-only upper bound to the end of that day.
-/// Values that already include a time pass through unchanged.
-pub fn expand_to_bound(input: &str) -> String {
-    if input.len() == 10 {
-        format!("{input}_23-59-59")
-    } else {
-        input.to_owned()
+/// Valid values that already include a time pass through unchanged.
+pub fn expand_to_bound(input: &str) -> Result<String, &'static str> {
+    expand_bound(input, "23-59-59").ok_or("`to` must be `YYYY-MM-DD` or `YYYY-MM-DD_HH-MM-SS`")
+}
+
+fn expand_bound(input: &str, date_only_time: &str) -> Option<String> {
+    match input.len() {
+        10 => {
+            if !crate::archive::matches_digit_shape(input, 10, &[(4, b'-'), (7, b'-')]) {
+                return None;
+            }
+            NaiveDate::parse_from_str(input, DATE_FORMAT).ok()?;
+            Some(format!("{input}_{date_only_time}"))
+        }
+        19 => {
+            if !crate::archive::matches_digit_shape(
+                input,
+                19,
+                &[(4, b'-'), (7, b'-'), (10, b'_'), (13, b'-'), (16, b'-')],
+            ) {
+                return None;
+            }
+            NaiveDateTime::parse_from_str(input, DATE_TIME_FORMAT).ok()?;
+            Some(input.to_owned())
+        }
+        _ => None,
     }
 }
 
@@ -147,11 +167,38 @@ mod tests {
 
     #[test]
     fn expands_date_only_bounds() {
-        assert_eq!(expand_from_bound("2026-07-01"), "2026-07-01_00-00-00");
-        assert_eq!(expand_to_bound("2026-07-10"), "2026-07-10_23-59-59");
         assert_eq!(
-            expand_from_bound("2026-07-01_12-00-00"),
+            expand_from_bound("2026-07-01").unwrap(),
+            "2026-07-01_00-00-00"
+        );
+        assert_eq!(
+            expand_to_bound("2026-07-10").unwrap(),
+            "2026-07-10_23-59-59"
+        );
+        assert_eq!(
+            expand_from_bound("2026-07-01_12-00-00").unwrap(),
             "2026-07-01_12-00-00"
         );
+        assert_eq!(
+            expand_from_bound("2024-02-29").unwrap(),
+            "2024-02-29_00-00-00"
+        );
+    }
+
+    #[test]
+    fn rejects_invalid_recording_time_bounds() {
+        for input in [
+            "2026-00-01",
+            "2026-13-01",
+            "2026-02-29",
+            "2026-07-01_24-00-00",
+            "2026-07-01T12:00:00",
+            "+026-07-01",
+            "",
+            " ",
+        ] {
+            assert!(expand_from_bound(input).is_err(), "accepted {input:?}");
+            assert!(expand_to_bound(input).is_err(), "accepted {input:?}");
+        }
     }
 }
