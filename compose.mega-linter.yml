@@ -1,6 +1,6 @@
 services:
   megalinter:
-    image: ghcr.io/oxsecurity/megalinter-rust:v9.5.0@sha256:2b13317b9b76f172643ffb507751ed5b9d341d92abbe96c4dd0c26f601807caf
+    image: ghcr.io/oxsecurity/megalinter-rust:v9.6.0@sha256:8d3a1ec8bac3dd209e517dc5151720bfaf6c9d2d7d1f1855ee2a40731d2ec563
     # Every variable below can be overridden from the host environment except
     # DEFAULT_WORKSPACE, which must match the volume mount path below.
     environment:
