@@ -43,4 +43,6 @@ MARKDOWN_DEFAULT_STYLE: rumdl
 SHOW_ELAPSED_TIME: true
 ADDITIONAL_EXCLUDED_DIRECTORIES:
   - .direnv
+  - .rumdl_cache
+  - aribcap-db-data
   - target
