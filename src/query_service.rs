@@ -80,7 +80,7 @@ impl From<io::Error> for QueryServiceError {
 pub struct SearchRequest {
     /// Search program metadata and caption text with one expression.
     pub q: Option<String>,
-    /// Search program titles and descriptions only.
+    /// Search program titles and descriptions only. May be combined with `line_q`.
     pub program_q: Option<String>,
     /// Search caption text only. May be combined with `program_q`.
     pub line_q: Option<String>,
@@ -88,13 +88,15 @@ pub struct SearchRequest {
     pub genre: Option<String>,
     /// Restrict results to one archive stream. When omitted, search all streams.
     pub stream: Option<String>,
-    /// Inclusive lower recording-time bound.
+    /// Inclusive lower recording-time bound in `YYYY-MM-DD` or `YYYY-MM-DD_HH-MM-SS` form.
+    /// A date-only value expands to `YYYY-MM-DD_00-00-00`.
     pub from: Option<String>,
-    /// Inclusive upper recording-time bound.
+    /// Inclusive upper recording-time bound in `YYYY-MM-DD` or `YYYY-MM-DD_HH-MM-SS` form.
+    /// A date-only value expands to `YYYY-MM-DD_23-59-59`.
     pub to: Option<String>,
-    /// Maximum programs to return. Defaults to 20 and is capped at 200.
+    /// Maximum programs to return. Defaults to 20 and is clamped to `1..200`.
     pub limit: Option<i64>,
-    /// Maximum caption hits per program. Defaults to 5 and is capped at 50.
+    /// Maximum caption hits per program. Defaults to 5 and is clamped to `1..50`.
     pub inner_hits: Option<i64>,
 }
 

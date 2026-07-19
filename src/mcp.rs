@@ -23,13 +23,13 @@ const MCP_SESSION_IDLE_TIMEOUT: Duration = Duration::from_secs(60 * 60);
 
 #[derive(Debug, Deserialize, JsonSchema)]
 pub struct GetProgramCaptionsRequest {
-    /// Archive stream name.
+    /// Archive stream name, such as `nhk`.
     pub stream: String,
-    /// Recording start timestamp from a search result, in YYYY-MM-DD_HH-MM-SS form.
+    /// Recording start timestamp from a search result, in `YYYY-MM-DD_HH-MM-SS` form.
     pub recording_started_at: String,
-    /// First JSONL line number to include. Defaults to 1.
+    /// First JSONL line number to include. One-based and inclusive; defaults to 1.
     pub start_line: Option<i64>,
-    /// Maximum number of captions to return. Defaults to 100 and is capped at 500.
+    /// Maximum number of captions to return. Defaults to 100 and is clamped to `1..500`.
     pub limit: Option<i64>,
 }
 
@@ -45,6 +45,11 @@ impl AribcapMcp {
             query_service,
             tool_router: Self::tool_router(),
         }
+    }
+
+    #[cfg(test)]
+    pub(crate) fn tools() -> Vec<rmcp::model::Tool> {
+        Self::tool_router().list_all()
     }
 }
 

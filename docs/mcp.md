@@ -53,11 +53,13 @@ expired session must initialize a new session.
 All tools are read-only and idempotent. The server does not provide MCP
 resources or prompts.
 
+<!-- generated: tool list_streams -->
 ### `list_streams`
 
-Lists archive stream names in stable order.
+List archive stream names that can be searched
 
 The tool takes no arguments.
+<!-- generated: tool list_streams end -->
 
 Example result:
 
@@ -67,24 +69,26 @@ Example result:
 }
 ```
 
+<!-- generated: tool search_programs -->
 ### `search_programs`
 
-Searches archived program titles, descriptions, and caption text. The result
-uses the same search behavior as `GET /api/programs/search`.
+Search archived program titles, descriptions, and caption text. When stream is omitted, all archive streams are searched. Results are ordered by newest program first; caption hits are ordered by their occurrence in the program, not relevance.
 
 Arguments:
 
-| Name | Type | Description |
-| --- | --- | --- |
-| `q` | string | Searches program metadata and caption text with one expression. |
-| `program_q` | string | Searches program titles and descriptions. |
-| `line_q` | string | Searches caption text. It may be combined with `program_q`. |
-| `stream` | string | Restricts results to one archive stream. If omitted, all streams are searched. |
-| `from` | string | Inclusive lower recording-time bound in `YYYY-MM-DD` or `YYYY-MM-DD_HH-MM-SS` form. A date-only value expands to `YYYY-MM-DD_00-00-00`. |
-| `to` | string | Inclusive upper recording-time bound in `YYYY-MM-DD` or `YYYY-MM-DD_HH-MM-SS` form. A date-only value expands to `YYYY-MM-DD_23-59-59`. |
-| `genre` | string | Genre filter in `0..15` or `0..15:0..15` form. |
-| `limit` | integer | Maximum programs to return. Defaults to 20 and is clamped to `1..200`. |
-| `inner_hits` | integer | Maximum caption hits per program. Defaults to 5 and is clamped to `1..50`. |
+| Name | Type | Required | Description |
+| --- | --- | --- | --- |
+| `q` | string | no | Search program metadata and caption text with one expression. |
+| `program_q` | string | no | Search program titles and descriptions only. May be combined with `line_q`. |
+| `line_q` | string | no | Search caption text only. May be combined with `program_q`. |
+| `genre` | string | no | Genre filter in `0..15` or `0..15:0..15` form. |
+| `stream` | string | no | Restrict results to one archive stream. When omitted, search all streams. |
+| `from` | string | no | Inclusive lower recording-time bound in `YYYY-MM-DD` or `YYYY-MM-DD_HH-MM-SS` form. A date-only value expands to `YYYY-MM-DD_00-00-00`. |
+| `to` | string | no | Inclusive upper recording-time bound in `YYYY-MM-DD` or `YYYY-MM-DD_HH-MM-SS` form. A date-only value expands to `YYYY-MM-DD_23-59-59`. |
+| `limit` | integer | no | Maximum programs to return. Defaults to 20 and is clamped to `1..200`. |
+| `inner_hits` | integer | no | Maximum caption hits per program. Defaults to 5 and is clamped to `1..50`. |
+
+<!-- generated: tool search_programs end -->
 
 Use one of these search forms:
 
@@ -153,20 +157,24 @@ Result behavior:
 | `startTime` | `null` when the program start time is unavailable. |
 | Caption hit `time` | `null` when the timestamp is unavailable. |
 
+<!-- generated: tool get_program_captions -->
 ### `get_program_captions`
 
-Returns a bounded page of structured caption lines for one archived program.
-Use the `stream` and `recordingStartedAt` values from a `search_programs` result
-as the `stream` and `recording_started_at` arguments.
+Get a bounded page of structured caption lines for one archived program
 
 Arguments:
 
 | Name | Type | Required | Description |
 | --- | --- | --- | --- |
-| `stream` | string | yes | Archive stream name. |
-| `recording_started_at` | string | yes | Recording start in `YYYY-MM-DD_HH-MM-SS` form. |
+| `stream` | string | yes | Archive stream name, such as `nhk`. |
+| `recording_started_at` | string | yes | Recording start timestamp from a search result, in `YYYY-MM-DD_HH-MM-SS` form. |
 | `start_line` | integer | no | First JSONL line number to include. One-based and inclusive; defaults to 1. |
-| `limit` | integer | no | Maximum captions to return. Defaults to 100 and is clamped to `1..500`. |
+| `limit` | integer | no | Maximum number of captions to return. Defaults to 100 and is clamped to `1..500`. |
+
+<!-- generated: tool get_program_captions end -->
+
+Use the `stream` and `recordingStartedAt` values from a `search_programs` result
+as the `stream` and `recording_started_at` arguments.
 
 Example arguments:
 

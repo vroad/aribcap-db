@@ -50,4 +50,5 @@ upon = { version = "0.10", default-features = false, features = ["serde"] }
 urlencoding = "2.1"
 
 [dev-dependencies]
+similar = "3.1"
 tower = { version = "0.5", features = ["util"] }

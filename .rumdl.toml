@@ -1,2 +1,5 @@
 [MD013]
 line-length = 100
+
+[per-file-ignores]
+"docs/mcp.md" = ["MD013"]
