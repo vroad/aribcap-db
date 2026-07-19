@@ -715,6 +715,9 @@ mod tests {
     };
 
     use super::*;
+    use crate::test_support::TestDir;
+
+    const TEST_DIR_PREFIX: &str = "aribcap-db-serve-test-";
 
     fn serve_config_with_addrs(addrs: Vec<ListenAddr>) -> ServeConfig {
         ServeConfig {
@@ -787,12 +790,8 @@ mod tests {
             shutdown_rx.clone(),
         ));
 
-        let socket_path = std::env::temp_dir().join(format!(
-            "aribcap-db-serve-test-{}-{}.sock",
-            std::process::id(),
-            tcp_addr.port()
-        ));
-        let _ = std::fs::remove_file(&socket_path);
+        let temp_dir = TestDir::new(TEST_DIR_PREFIX);
+        let socket_path = temp_dir.join("server.sock");
         let unix_listener = bind_unix_listener(&socket_path).await.unwrap();
         let unix_task = tokio::spawn(run_http_server_once(
             format!("unix:{}", socket_path.display()),
@@ -825,50 +824,41 @@ mod tests {
 
         tcp_task.abort();
         unix_task.abort();
-        std::fs::remove_file(&socket_path).unwrap();
     }
 
     #[cfg(unix)]
-    fn unique_socket_path(label: &str) -> PathBuf {
-        std::env::temp_dir().join(format!(
-            "aribcap-db-serve-test-{label}-{}-{}.sock",
-            std::process::id(),
-            std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)
-                .unwrap()
-                .as_nanos()
-        ))
+    fn unique_socket_path(label: &str) -> (TestDir, PathBuf) {
+        let temp_dir = TestDir::new(TEST_DIR_PREFIX);
+        let path = temp_dir.join(format!("{label}.sock"));
+        (temp_dir, path)
     }
 
     #[cfg(unix)]
     #[tokio::test]
     async fn bind_unix_listener_removes_stale_socket_and_rebinds() {
-        let socket_path = unique_socket_path("stale");
+        let (_temp_dir, socket_path) = unique_socket_path("stale");
         let first_listener = tokio::net::UnixListener::bind(&socket_path).unwrap();
         drop(first_listener);
 
         let second_listener = bind_unix_listener(&socket_path).await.unwrap();
         drop(second_listener);
-        std::fs::remove_file(&socket_path).unwrap();
     }
 
     #[cfg(unix)]
     #[tokio::test]
     async fn bind_unix_listener_refuses_regular_file() {
-        let path = unique_socket_path("regular-file");
+        let (_temp_dir, path) = unique_socket_path("regular-file");
         std::fs::write(&path, b"not a socket").unwrap();
 
         let error = bind_unix_listener(&path).await.unwrap_err();
         assert_eq!(error.kind(), io::ErrorKind::AlreadyExists);
         assert_eq!(std::fs::read(&path).unwrap(), b"not a socket");
-
-        std::fs::remove_file(&path).unwrap();
     }
 
     #[cfg(unix)]
     #[tokio::test]
     async fn bind_unix_listener_refuses_socket_in_use() {
-        let socket_path = unique_socket_path("live");
+        let (_temp_dir, socket_path) = unique_socket_path("live");
         let live_listener = tokio::net::UnixListener::bind(&socket_path).unwrap();
 
         let error = bind_unix_listener(&socket_path).await.unwrap_err();
@@ -884,13 +874,12 @@ mod tests {
         connected.unwrap().unwrap();
 
         drop(live_listener);
-        std::fs::remove_file(&socket_path).unwrap();
     }
 
     #[cfg(unix)]
     #[tokio::test]
     async fn bind_unix_listener_race_does_not_orphan_the_winning_listener() {
-        let socket_path = unique_socket_path("race");
+        let (_temp_dir, socket_path) = unique_socket_path("race");
         // Leave a stale socket file behind, like a crashed prior instance would.
         let stale = tokio::net::UnixListener::bind(&socket_path).unwrap();
         drop(stale);
@@ -921,8 +910,6 @@ mod tests {
         connected.unwrap().unwrap();
 
         drop(winner);
-        std::fs::remove_file(&socket_path).unwrap();
-        std::fs::remove_file(lock_path_for(&socket_path)).unwrap();
     }
 
     #[cfg(unix)]
@@ -942,7 +929,7 @@ mod tests {
             }),
         );
 
-        let socket_path = unique_socket_path("drain");
+        let (_temp_dir, socket_path) = unique_socket_path("drain");
         let (shutdown_tx, shutdown_rx) = watch::channel(false);
         let listeners_task = tokio::spawn(run_http_listeners(
             vec![ListenAddr::UnixSocket(socket_path.clone())],
@@ -1007,8 +994,6 @@ mod tests {
             "run_http_listeners returned before the in-flight handler could have finished \
             ({listeners_elapsed:?} elapsed), meaning it aborted rather than drained the request"
         );
-
-        std::fs::remove_file(&socket_path).unwrap();
     }
 
     #[tokio::test]

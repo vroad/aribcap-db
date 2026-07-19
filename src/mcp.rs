@@ -170,7 +170,10 @@ fn tool_error(error: QueryServiceError) -> String {
 
 #[cfg(test)]
 mod tests {
-    use std::sync::{Arc, atomic::AtomicBool};
+    use std::{
+        path::PathBuf,
+        sync::{Arc, atomic::AtomicBool},
+    };
 
     use axum::{
         body::{Body, to_bytes},
@@ -189,8 +192,7 @@ mod tests {
 
     #[tokio::test]
     async fn data_tools_report_when_search_database_is_not_ready() {
-        let data_dir =
-            std::env::temp_dir().join(format!("aribcap-db-mcp-not-ready-{}", std::process::id()));
+        let data_dir = PathBuf::from("test-data");
         let service = ArchiveQueryService::new(
             data_dir.clone(),
             data_dir.join("search.sqlite3"),
@@ -210,10 +212,7 @@ mod tests {
 
     #[tokio::test]
     async fn idle_sessions_expire_and_clients_can_initialize_again() {
-        let data_dir = std::env::temp_dir().join(format!(
-            "aribcap-db-mcp-session-timeout-{}",
-            std::process::id()
-        ));
+        let data_dir = PathBuf::from("test-data");
         let query_service = ArchiveQueryService::new(
             data_dir.clone(),
             data_dir.join("search.sqlite3"),

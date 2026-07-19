@@ -576,15 +576,14 @@ where
 mod tests {
     use std::{
         fs,
-        sync::{
-            Arc,
-            atomic::{AtomicBool, AtomicUsize, Ordering},
-        },
+        sync::{Arc, atomic::AtomicBool},
     };
 
     use super::*;
 
-    static NEXT_TEMP_DIR: AtomicUsize = AtomicUsize::new(0);
+    use crate::test_support::TestDir;
+
+    const TEST_DIR_PREFIX: &str = "aribcap-db-query-service-test-";
     const RECORDING_STARTED_AT: &str = "2026-07-15_12-00-00";
 
     #[test]
@@ -650,7 +649,7 @@ mod tests {
         assert!(matches!(error, QueryServiceError::BadRequest(_)));
 
         service.search_pool.close().await;
-        fs::remove_dir_all(data_dir).unwrap();
+        drop(data_dir);
     }
 
     #[tokio::test]
@@ -767,7 +766,7 @@ mod tests {
         }
 
         service.search_pool.close().await;
-        fs::remove_dir_all(data_dir).unwrap();
+        drop(data_dir);
     }
 
     #[tokio::test]
@@ -827,16 +826,11 @@ mod tests {
         assert!(matches!(missing, QueryServiceError::NotFound(_)));
 
         service.search_pool.close().await;
-        fs::remove_dir_all(data_dir).unwrap();
+        drop(data_dir);
     }
 
-    async fn seeded_service(caption_count: usize) -> (PathBuf, ArchiveQueryService) {
-        let id = NEXT_TEMP_DIR.fetch_add(1, Ordering::Relaxed);
-        let data_dir = std::env::temp_dir().join(format!(
-            "aribcap-db-query-service-test-{}-{id}",
-            std::process::id()
-        ));
-        let _ = fs::remove_dir_all(&data_dir);
+    async fn seeded_service(caption_count: usize) -> (TestDir, ArchiveQueryService) {
+        let data_dir = TestDir::new(TEST_DIR_PREFIX);
         let month_dir = archive::archive_root(&data_dir).join("nhk").join("2026-07");
         fs::create_dir_all(&month_dir).unwrap();
 
@@ -860,8 +854,11 @@ mod tests {
             .unwrap();
         drop(connection);
 
-        let service =
-            ArchiveQueryService::new(data_dir.clone(), db_path, Arc::new(AtomicBool::new(true)));
+        let service = ArchiveQueryService::new(
+            data_dir.to_path_buf(),
+            db_path,
+            Arc::new(AtomicBool::new(true)),
+        );
         (data_dir, service)
     }
 }

@@ -697,6 +697,9 @@ mod tests {
     use futures_util::TryStreamExt as _;
 
     use super::*;
+    use crate::test_support::TestDir;
+
+    const TEST_DIR_PREFIX: &str = "aribcap-archive-test-";
 
     async fn collect_archive_walk(root: &Path, target: ArchiveWalkTarget) -> Result<Vec<PathBuf>> {
         walk_archive_paths(root, target).try_collect().await
@@ -704,11 +707,7 @@ mod tests {
 
     #[tokio::test]
     async fn archive_walk_files_yields_only_regular_files_at_file_depth() {
-        let data_dir = std::env::temp_dir().join(format!(
-            "aribcap-archive-walk-files-test-{}",
-            std::process::id()
-        ));
-        let _ = fs::remove_dir_all(&data_dir);
+        let data_dir = TestDir::new(TEST_DIR_PREFIX);
         let root = archive_root(&data_dir);
         let month = root.join("nhk").join("2026-07");
         fs::create_dir_all(month.join("nested")).unwrap();
@@ -726,16 +725,11 @@ mod tests {
         paths.sort();
 
         assert_eq!(paths, vec![first, second]);
-        fs::remove_dir_all(data_dir).unwrap();
     }
 
     #[tokio::test]
     async fn archive_walk_month_directories_stops_at_month_depth() {
-        let data_dir = std::env::temp_dir().join(format!(
-            "aribcap-archive-walk-months-test-{}",
-            std::process::id()
-        ));
-        let _ = fs::remove_dir_all(&data_dir);
+        let data_dir = TestDir::new(TEST_DIR_PREFIX);
         let root = archive_root(&data_dir);
         let first = root.join("nhk").join("2026-06");
         let second = root.join("nhk").join("2026-07");
@@ -749,16 +743,12 @@ mod tests {
         paths.sort();
 
         assert_eq!(paths, vec![first, second]);
-        fs::remove_dir_all(data_dir).unwrap();
     }
 
     #[tokio::test]
     async fn archive_walk_missing_root_is_empty() {
-        let root = std::env::temp_dir().join(format!(
-            "aribcap-archive-walk-missing-test-{}",
-            std::process::id()
-        ));
-        let _ = fs::remove_dir_all(&root);
+        let data_dir = TestDir::new(TEST_DIR_PREFIX);
+        let root = data_dir.join("missing");
 
         let paths = collect_archive_walk(&root, ArchiveWalkTarget::Files)
             .await
@@ -784,12 +774,8 @@ mod tests {
 
     #[test]
     fn continues_writing_after_store_mutex_is_poisoned() {
-        let data_dir = std::env::temp_dir().join(format!(
-            "aribcap-archive-poison-recovery-test-{}",
-            std::process::id()
-        ));
-        let _ = fs::remove_dir_all(&data_dir);
-        let store = Arc::new(Mutex::new(ArchiveStore::new(&data_dir)));
+        let data_dir = TestDir::new(TEST_DIR_PREFIX);
+        let store = Arc::new(Mutex::new(ArchiveStore::new(data_dir.to_path_buf())));
         let now = DateTime::parse_from_rfc3339("2026-07-13T12:00:00+09:00").unwrap();
         let eit = r#"{"type":"eit","section":"present","eventId":1}"#;
         let caption = r#"{"type":"caption","text":"after poison"}"#;
@@ -812,7 +798,6 @@ mod tests {
             fs::read_to_string(path).unwrap(),
             format!("{eit}\n{caption}\n")
         );
-        fs::remove_dir_all(data_dir).unwrap();
     }
 
     #[test]
@@ -829,16 +814,12 @@ mod tests {
 
     #[tokio::test]
     async fn garbage_collection_dry_run_counts_without_deleting() {
-        let data_dir = std::env::temp_dir().join(format!(
-            "aribcap-archive-gc-dry-run-test-{}",
-            std::process::id()
-        ));
-        let _ = fs::remove_dir_all(&data_dir);
+        let data_dir = TestDir::new(TEST_DIR_PREFIX);
         let directory = archive_root(&data_dir).join("nhk").join("2000-01");
         fs::create_dir_all(&directory).unwrap();
         let expired = directory.join("2000-01-01_00-00-00.news.jsonl");
         fs::write(&expired, "{}\n").unwrap();
-        let store = Arc::new(Mutex::new(ArchiveStore::new(&data_dir)));
+        let store = Arc::new(Mutex::new(ArchiveStore::new(data_dir.to_path_buf())));
 
         let dry_run = dry_run_garbage_collection(&store, Duration::from_secs(24 * 60 * 60))
             .await
@@ -846,17 +827,12 @@ mod tests {
 
         assert_eq!(dry_run.eligible_files, 1);
         assert!(expired.exists());
-        fs::remove_dir_all(data_dir).unwrap();
     }
 
     #[tokio::test]
     async fn garbage_collection_deletes_expired_file_after_deactivation() {
-        let data_dir = std::env::temp_dir().join(format!(
-            "aribcap-archive-gc-active-test-{}",
-            std::process::id()
-        ));
-        let _ = fs::remove_dir_all(&data_dir);
-        let store = Arc::new(Mutex::new(ArchiveStore::new(&data_dir)));
+        let data_dir = TestDir::new(TEST_DIR_PREFIX);
+        let store = Arc::new(Mutex::new(ArchiveStore::new(data_dir.to_path_buf())));
         let recorded_at = DateTime::parse_from_rfc3339("2000-01-01T00:00:00+09:00").unwrap();
         let eit = r#"{"type":"eit","section":"present","eventId":1}"#;
         let started = handle_line_at(&store, "nhk", eit, recorded_at)
@@ -874,16 +850,11 @@ mod tests {
 
         assert_eq!(collect_garbage(&store, retention).await.unwrap(), 1);
         assert!(!path.exists());
-        fs::remove_dir_all(data_dir).unwrap();
     }
 
     #[tokio::test]
     async fn garbage_collection_removes_empty_month_but_keeps_stream_directory() {
-        let data_dir = std::env::temp_dir().join(format!(
-            "aribcap-archive-gc-empty-month-test-{}",
-            std::process::id()
-        ));
-        let _ = fs::remove_dir_all(&data_dir);
+        let data_dir = TestDir::new(TEST_DIR_PREFIX);
         let stream_directory = archive_root(&data_dir).join("nhk");
         let month_directory = stream_directory.join("2000-01");
         fs::create_dir_all(&month_directory).unwrap();
@@ -892,7 +863,7 @@ mod tests {
             "{}\n",
         )
         .unwrap();
-        let store = Arc::new(Mutex::new(ArchiveStore::new(&data_dir)));
+        let store = Arc::new(Mutex::new(ArchiveStore::new(data_dir.to_path_buf())));
 
         assert_eq!(
             collect_garbage(&store, Duration::from_secs(24 * 60 * 60))
@@ -902,18 +873,12 @@ mod tests {
         );
         assert!(!month_directory.exists());
         assert!(stream_directory.is_dir());
-
-        fs::remove_dir_all(data_dir).unwrap();
     }
 
     #[test]
     fn deactivated_stream_waits_for_next_present_eit() {
-        let data_dir = std::env::temp_dir().join(format!(
-            "aribcap-archive-deactivate-test-{}",
-            std::process::id()
-        ));
-        let _ = fs::remove_dir_all(&data_dir);
-        let store = Arc::new(Mutex::new(ArchiveStore::new(&data_dir)));
+        let data_dir = TestDir::new(TEST_DIR_PREFIX);
+        let store = Arc::new(Mutex::new(ArchiveStore::new(data_dir.to_path_buf())));
         let now = DateTime::parse_from_rfc3339("2026-07-13T12:00:00+09:00").unwrap();
         let eit = r#"{"type":"eit","section":"present","eventId":1}"#;
         let started = handle_line_at(&store, "nhk", eit, now).unwrap().unwrap();
@@ -932,15 +897,12 @@ mod tests {
             panic!("expected a new archive file")
         };
         assert_eq!(fs::read_to_string(path).unwrap(), format!("{eit}\n"));
-        fs::remove_dir_all(data_dir).unwrap();
     }
 
     #[test]
     fn records_lines_after_present_eit_in_one_archive_file() {
-        let data_dir =
-            std::env::temp_dir().join(format!("aribcap-archive-test-{}", std::process::id()));
-        let _ = fs::remove_dir_all(&data_dir);
-        let store = Arc::new(Mutex::new(ArchiveStore::new(&data_dir)));
+        let data_dir = TestDir::new(TEST_DIR_PREFIX);
+        let store = Arc::new(Mutex::new(ArchiveStore::new(data_dir.to_path_buf())));
         let now = DateTime::parse_from_rfc3339("2026-07-13T12:00:00+09:00").unwrap();
         let eit = r#"{"type":"eit","section":"present","eventId":1,"shortEvents":[{"languageCode":"jpn","eventName":"ニュース"}]}"#;
 
@@ -958,14 +920,11 @@ mod tests {
             fs::read_to_string(path).unwrap(),
             format!("{eit}\n{{\"type\":\"caption\",\"text\":\"after\"}}\n")
         );
-        fs::remove_dir_all(data_dir).unwrap();
     }
 
     #[test]
     fn lists_archive_directories_and_resolves_archive_file_paths() {
-        let data_dir =
-            std::env::temp_dir().join(format!("aribcap-archive-list-test-{}", std::process::id()));
-        let _ = fs::remove_dir_all(&data_dir);
+        let data_dir = TestDir::new(TEST_DIR_PREFIX);
         let directory = archive_root(&data_dir).join("nhk").join("2026-07");
         fs::create_dir_all(&directory).unwrap();
         let filename = "2026-07-14_12-00-00.news#weather.jsonl";
@@ -1003,20 +962,18 @@ mod tests {
                 None
             );
         }
-
-        fs::remove_dir_all(data_dir).unwrap();
     }
 
     #[test]
     fn archive_listing_rejects_invalid_path_components() {
-        let data_dir = std::env::temp_dir();
+        let data_dir = Path::new("data");
 
         assert_eq!(
-            list_months(&data_dir, "..").unwrap_err().kind(),
+            list_months(data_dir, "..").unwrap_err().kind(),
             io::ErrorKind::InvalidInput
         );
         assert_eq!(
-            resolve_archive_file_path(&data_dir, "nhk", "2026-07", "../archive.jsonl")
+            resolve_archive_file_path(data_dir, "nhk", "2026-07", "../archive.jsonl")
                 .unwrap_err()
                 .kind(),
             io::ErrorKind::InvalidInput

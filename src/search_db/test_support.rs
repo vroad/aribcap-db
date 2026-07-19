@@ -1,21 +1,9 @@
 use std::{
     fs,
     path::{Path, PathBuf},
-    sync::atomic::{AtomicUsize, Ordering},
 };
 
-static NEXT_TEMP_DIR: AtomicUsize = AtomicUsize::new(0);
-
-pub(super) fn temp_dir() -> PathBuf {
-    let id = NEXT_TEMP_DIR.fetch_add(1, Ordering::Relaxed);
-    let path = std::env::temp_dir().join(format!(
-        "aribcap-db-search-db-test-{}-{id}",
-        std::process::id()
-    ));
-    let _ = fs::remove_dir_all(&path);
-    fs::create_dir_all(&path).unwrap();
-    path
-}
+pub(super) const TEST_DIR_PREFIX: &str = "aribcap-db-search-db-test-";
 
 pub(super) fn write_file(
     archive_root: &Path,
