@@ -1,0 +1,4 @@
+(^|/)\.direnv(/|$)
+(^|/)\.rumdl_cache(/|$)
+(^|/)aribcap-db-data(/|$)
+(^|/)target(/|$)
