@@ -36,6 +36,9 @@ REPOSITORY_SEMGREP_RULESETS:
   - p/rust
   - p/security-audit
   - p/secrets
+REPOSITORY_SECRETLINT_ARGUMENTS:
+  - "--secretlintignore"
+  - ".gitignore"
 MARKDOWN_DEFAULT_STYLE: rumdl
 SHOW_ELAPSED_TIME: true
 ADDITIONAL_EXCLUDED_DIRECTORIES:
