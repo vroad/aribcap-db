@@ -93,6 +93,9 @@ where
 #[cfg(test)]
 mod tests {
     #[cfg(unix)]
+    const TEST_DIR_PREFIX: &str = "aribcap-db-stream-test-";
+
+    #[cfg(unix)]
     use std::sync::{Arc, Mutex};
 
     #[cfg(unix)]
@@ -168,16 +171,10 @@ mod tests {
     #[cfg(unix)]
     #[tokio::test]
     async fn tails_http_stream_over_configured_unix_socket() {
-        use crate::config::Config;
+        use crate::{config::Config, test_support::TestDir};
 
-        let socket_path = std::env::temp_dir().join(format!(
-            "aribcap-db-stream-test-{}-{}.sock",
-            std::process::id(),
-            std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)
-                .unwrap()
-                .as_nanos()
-        ));
+        let temp_dir = TestDir::new(TEST_DIR_PREFIX);
+        let socket_path = temp_dir.join("stream.sock");
         let listener = tokio::net::UnixListener::bind(&socket_path).unwrap();
         let server = tokio::spawn(async move {
             let (mut connection, _) = listener.accept().await.unwrap();
@@ -218,7 +215,6 @@ unix_socket = "{}"
         .unwrap_err();
 
         server.await.unwrap();
-        std::fs::remove_file(socket_path).unwrap();
         assert_eq!(error.to_string(), "stream ended");
         assert_eq!(*lines.lock().unwrap(), vec![r#"{"text":"hello"}"#]);
     }

@@ -554,10 +554,7 @@ impl OperationOutput for HttpError {
 mod tests {
     use std::{
         fs,
-        sync::{
-            Arc,
-            atomic::{AtomicUsize, Ordering},
-        },
+        sync::{Arc, atomic::AtomicBool},
     };
 
     use axum::{body::to_bytes, http::Request};
@@ -566,8 +563,9 @@ mod tests {
 
     use super::*;
     use crate::search_db;
+    use crate::test_support::TestDir;
 
-    static NEXT_TEMP_DIR: AtomicUsize = AtomicUsize::new(0);
+    const TEST_DIR_PREFIX: &str = "aribcap-db-server-test-";
     const ARCHIVE_FILE_NAME: &str = "2020-01-01_00-00-00.title#part.jsonl";
     const ARCHIVE_FILE_BODY: &str = "{\"type\":\"eit\",\"section\":\"present\",\"startTime\":\"2020-01-01T00:00:00.000+09:00\",\"durationSec\":1800,\"shortEvents\":[{\"languageCode\":\"jpn\",\"eventName\":\"title\"}]}\n{\"type\":\"caption\",\"time\":\"2020-01-01T00:00:01.000+09:00\",\"text\":\"caption\",\"languageCode\":\"jpn\",\"durationMs\":500}\n{\"type\":\"caption\",\"time\":\"2020-01-01T00:00:02.000+09:00\",\"text\":\"second caption\",\"languageCode\":\"jpn\",\"durationMs\":600}\n";
     const OTHER_ARCHIVE_FILE_NAME: &str = "2020-01-02_00-00-00.other.jsonl";
@@ -625,7 +623,7 @@ mod tests {
         let search: serde_json::Value = serde_json::from_str(&body_text(response).await).unwrap();
         assert_eq!(search["items"][0]["path"], RAW_PROGRAM_PATH);
 
-        fs::remove_dir_all(data_dir).unwrap();
+        drop(data_dir);
     }
 
     #[tokio::test]
@@ -730,12 +728,12 @@ mod tests {
             );
         }
 
-        fs::remove_dir_all(data_dir).unwrap();
+        drop(data_dir);
     }
 
     #[tokio::test]
     async fn archive_routes_return_only_the_collision_winner() {
-        let data_dir = temp_dir();
+        let data_dir = TestDir::new(TEST_DIR_PREFIX);
         let month_dir = archive::archive_root(&data_dir).join("nhk").join("2020-01");
         fs::create_dir_all(&month_dir).unwrap();
         fs::write(month_dir.join(ARCHIVE_FILE_NAME), ARCHIVE_FILE_BODY).unwrap();
@@ -750,7 +748,7 @@ mod tests {
             .await
             .unwrap();
         drop(connection);
-        let app = test_router(data_dir.clone(), Arc::new(LiveBroadcaster::new([])));
+        let app = test_router(data_dir.to_path_buf(), Arc::new(LiveBroadcaster::new([])));
 
         let response = get(&app, "/api/programs?stream=nhk&month=2020-01").await;
         let programs: Vec<serde_json::Value> =
@@ -763,7 +761,7 @@ mod tests {
         assert_eq!(response.status(), StatusCode::OK);
         assert_eq!(body_text(response).await, ARCHIVE_FILE_BODY);
 
-        fs::remove_dir_all(data_dir).unwrap();
+        drop(data_dir);
     }
 
     #[tokio::test]
@@ -812,7 +810,7 @@ mod tests {
 
         assert_json_error(&app, "/api/live/%FF", StatusCode::BAD_REQUEST).await;
 
-        fs::remove_dir_all(data_dir).unwrap();
+        drop(data_dir);
     }
 
     #[tokio::test]
@@ -830,16 +828,16 @@ mod tests {
             assert_json_error(&app, uri, StatusCode::BAD_REQUEST).await;
         }
 
-        fs::remove_dir_all(data_dir).unwrap();
+        drop(data_dir);
     }
 
     #[tokio::test]
     async fn live_route_streams_lines_and_rejects_unknown_streams() {
-        let data_dir = temp_dir();
+        let data_dir = TestDir::new(TEST_DIR_PREFIX);
         let broadcaster = Arc::new(LiveBroadcaster::new(["nhk".to_owned()]));
         let (shutdown_tx, shutdown_rx) = watch::channel(false);
         let app = router(
-            data_dir.clone(),
+            data_dir.to_path_buf(),
             search_db::search_db_path(&data_dir),
             broadcaster.clone(),
             Arc::new(AtomicBool::new(false)),
@@ -862,16 +860,16 @@ mod tests {
         let response = get(&app, "/api/live/other").await;
         assert_eq!(response.status(), StatusCode::NOT_FOUND);
 
-        fs::remove_dir_all(data_dir).unwrap();
+        drop(data_dir);
     }
 
     #[tokio::test]
     async fn non_live_routes_return_service_unavailable_until_search_db_is_ready() {
-        let data_dir = temp_dir();
+        let data_dir = TestDir::new(TEST_DIR_PREFIX);
         let ready = Arc::new(AtomicBool::new(false));
         let (_, shutdown) = watch::channel(false);
         let app = router(
-            data_dir.clone(),
+            data_dir.to_path_buf(),
             search_db::search_db_path(&data_dir),
             Arc::new(LiveBroadcaster::new(["nhk".to_owned()])),
             ready.clone(),
@@ -948,14 +946,14 @@ mod tests {
         ready.store(true, Ordering::Release);
         assert_eq!(get(&app, "/api/streams").await.status(), StatusCode::OK);
 
-        fs::remove_dir_all(data_dir).unwrap();
+        drop(data_dir);
     }
 
     #[tokio::test]
     async fn openapi_and_docs_are_available_before_search_db_is_ready() {
-        let data_dir = temp_dir();
+        let data_dir = TestDir::new(TEST_DIR_PREFIX);
         let app = test_router(
-            data_dir.clone(),
+            data_dir.to_path_buf(),
             Arc::new(LiveBroadcaster::new(["nhk".to_owned()])),
         );
 
@@ -1008,7 +1006,7 @@ mod tests {
         );
         assert!(body_text(response).await.contains("/openapi.json"));
 
-        fs::remove_dir_all(data_dir).unwrap();
+        drop(data_dir);
     }
 
     #[tokio::test]
@@ -1021,7 +1019,7 @@ mod tests {
         )
         .await;
         assert_eq!(response.status(), StatusCode::NOT_FOUND);
-        fs::remove_dir_all(data_dir).unwrap();
+        drop(data_dir);
 
         let (data_dir, app) = app_with_program_mcp().await;
         let response = get(&app, "/openapi.json").await;
@@ -1166,7 +1164,7 @@ mod tests {
             assert_eq!(error["result"]["isError"], true, "request {id}");
         }
 
-        fs::remove_dir_all(data_dir).unwrap();
+        drop(data_dir);
     }
 
     async fn get(app: &Router, uri: &str) -> Response {
@@ -1215,35 +1213,35 @@ mod tests {
         assert!(body["error"].is_string());
     }
 
-    async fn empty_app() -> (PathBuf, Router) {
-        let data_dir = temp_dir();
+    async fn empty_app() -> (TestDir, Router) {
+        let data_dir = TestDir::new(TEST_DIR_PREFIX);
         let db_path = search_db::search_db_path(&data_dir);
         search_db::open_and_migrate(&db_path).await.unwrap();
-        let app = test_router(data_dir.clone(), Arc::new(LiveBroadcaster::new([])));
+        let app = test_router(data_dir.to_path_buf(), Arc::new(LiveBroadcaster::new([])));
         (data_dir, app)
     }
 
-    async fn app_with_program() -> (PathBuf, Router) {
+    async fn app_with_program() -> (TestDir, Router) {
         app_with_program_options(false).await
     }
 
-    async fn app_with_program_mcp() -> (PathBuf, Router) {
+    async fn app_with_program_mcp() -> (TestDir, Router) {
         app_with_program_options(true).await
     }
 
-    async fn app_with_programs_mcp() -> (PathBuf, Router) {
+    async fn app_with_programs_mcp() -> (TestDir, Router) {
         app_with_program_options_and_second_stream(true, true).await
     }
 
-    async fn app_with_program_options(mcp_enabled: bool) -> (PathBuf, Router) {
+    async fn app_with_program_options(mcp_enabled: bool) -> (TestDir, Router) {
         app_with_program_options_and_second_stream(mcp_enabled, false).await
     }
 
     async fn app_with_program_options_and_second_stream(
         mcp_enabled: bool,
         include_second_stream: bool,
-    ) -> (PathBuf, Router) {
-        let data_dir = temp_dir();
+    ) -> (TestDir, Router) {
+        let data_dir = TestDir::new(TEST_DIR_PREFIX);
         let month_dir = archive::archive_root(&data_dir).join("nhk").join("2020-01");
         fs::create_dir_all(&month_dir).unwrap();
         fs::write(month_dir.join(ARCHIVE_FILE_NAME), ARCHIVE_FILE_BODY).unwrap();
@@ -1264,7 +1262,7 @@ mod tests {
         drop(connection);
         let (_, shutdown) = watch::channel(false);
         let app = router(
-            data_dir.clone(),
+            data_dir.to_path_buf(),
             search_db::search_db_path(&data_dir),
             Arc::new(LiveBroadcaster::new([])),
             Arc::new(AtomicBool::new(true)),
@@ -1286,16 +1284,5 @@ mod tests {
             false,
             CancellationToken::new(),
         )
-    }
-
-    fn temp_dir() -> PathBuf {
-        let id = NEXT_TEMP_DIR.fetch_add(1, Ordering::Relaxed);
-        let path = std::env::temp_dir().join(format!(
-            "aribcap-db-server-test-{}-{id}",
-            std::process::id()
-        ));
-        let _ = fs::remove_dir_all(&path);
-        fs::create_dir_all(&path).unwrap();
-        path
     }
 }

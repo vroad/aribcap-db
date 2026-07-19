@@ -49,12 +49,13 @@ pub(crate) async fn acquire_data_dir_lock(data_dir: &Path) -> Result<DataDirLock
 
 #[cfg(test)]
 mod tests {
-    use super::super::test_support::temp_dir;
+    use super::super::test_support::TEST_DIR_PREFIX;
     use super::*;
+    use crate::test_support::TestDir;
 
     #[tokio::test]
     async fn second_lock_attempt_is_rejected() {
-        let data_dir = temp_dir();
+        let data_dir = TestDir::new(TEST_DIR_PREFIX);
 
         let first = acquire_data_dir_lock(&data_dir).await.unwrap();
 

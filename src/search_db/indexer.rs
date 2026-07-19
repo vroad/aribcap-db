@@ -212,7 +212,8 @@ mod tests {
     use super::*;
     use crate::archive::ArchiveEvent;
 
-    use super::super::test_support::{eit_line, temp_dir};
+    use super::super::test_support::{TEST_DIR_PREFIX, eit_line};
+    use crate::test_support::TestDir;
 
     #[test]
     fn garbage_collection_is_due_after_interval() {
@@ -233,9 +234,9 @@ mod tests {
 
     #[tokio::test]
     async fn failed_archive_path_is_retried_by_the_next_pass() {
-        let data_dir = temp_dir();
+        let data_dir = TestDir::new(TEST_DIR_PREFIX);
         let archive_root = archive::archive_root(&data_dir);
-        let store = Arc::new(Mutex::new(ArchiveStore::new(&data_dir)));
+        let store = Arc::new(Mutex::new(ArchiveStore::new(data_dir.to_path_buf())));
         let line = eit_line(1, "ニュース", "");
         let Some(ArchiveEvent::ProgramStarted(path)) =
             archive::handle_line(&store, "nhk", &line).unwrap()
@@ -270,7 +271,7 @@ mod tests {
 
     #[tokio::test]
     async fn run_rebuild_refuses_while_data_dir_is_locked() {
-        let data_dir = temp_dir();
+        let data_dir = TestDir::new(TEST_DIR_PREFIX);
         let _lock = acquire_data_dir_lock(&data_dir).await.unwrap();
 
         let error = run_rebuild(&data_dir).await.unwrap_err();

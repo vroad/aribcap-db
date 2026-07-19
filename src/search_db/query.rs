@@ -502,16 +502,19 @@ pub async fn get_caption_page(
 mod tests {
     use super::super::db::open_and_migrate;
     use super::super::ingest::ingest_once;
-    use super::super::test_support::{caption_line, eit_line_with_genre, temp_dir, write_file};
+    use super::super::test_support::{
+        TEST_DIR_PREFIX, caption_line, eit_line_with_genre, write_file,
+    };
     use super::super::text::parse_search_expression;
     use super::*;
+    use crate::test_support::TestDir;
 
     fn expression(input: &str) -> SearchExpression {
         parse_search_expression(input).unwrap()
     }
 
-    async fn seed_search_db() -> SqliteConnection {
-        let data_dir = temp_dir();
+    async fn seed_search_db() -> (crate::test_support::TestDir, SqliteConnection) {
+        let data_dir = TestDir::new(TEST_DIR_PREFIX);
         let archive_root = data_dir.join("archive");
         let content = format!(
             "{}\n{}\n{}\n",
@@ -546,11 +549,13 @@ mod tests {
         let db_path = data_dir.join("search.sqlite3");
         let mut conn = open_and_migrate(&db_path).await.unwrap();
         ingest_once(&mut conn, &archive_root).await.unwrap();
-        conn
+        (data_dir, conn)
     }
 
-    async fn seed_many_caption_hits(count: usize) -> SqliteConnection {
-        let data_dir = temp_dir();
+    async fn seed_many_caption_hits(
+        count: usize,
+    ) -> (crate::test_support::TestDir, SqliteConnection) {
+        let data_dir = TestDir::new(TEST_DIR_PREFIX);
         let archive_root = data_dir.join("archive");
         let mut content = format!("{}\n", eit_line_with_genre(10, "ニュース", "", 5, 2));
         for index in 0..count {
@@ -572,12 +577,12 @@ mod tests {
             .await
             .unwrap();
         ingest_once(&mut conn, &archive_root).await.unwrap();
-        conn
+        (data_dir, conn)
     }
 
     #[tokio::test]
     async fn search_captions_finds_two_character_hit() {
-        let mut conn = seed_search_db().await;
+        let (_data_dir, mut conn) = seed_search_db().await;
         let filter = SearchFilter::default();
 
         let results = search_captions(&mut conn, &expression("台風"), &filter, 20, 5)
@@ -591,7 +596,7 @@ mod tests {
 
     #[tokio::test]
     async fn search_captions_requires_exact_normalized_substring() {
-        let mut conn = seed_search_db().await;
+        let (_data_dir, mut conn) = seed_search_db().await;
         let filter = SearchFilter::default();
 
         let results = search_captions(&mut conn, &expression("関東に"), &filter, 20, 5)
@@ -611,7 +616,7 @@ mod tests {
 
     #[tokio::test]
     async fn search_captions_ignores_non_alphanumeric_characters() {
-        let mut conn = seed_search_db().await;
+        let (_data_dir, mut conn) = seed_search_db().await;
         let filter = SearchFilter::default();
 
         let results = search_captions(&mut conn, &expression("関・東"), &filter, 20, 5)
@@ -623,7 +628,7 @@ mod tests {
 
     #[tokio::test]
     async fn search_captions_supports_mixed_length_and_expression() {
-        let mut conn = seed_search_db().await;
+        let (_data_dir, mut conn) = seed_search_db().await;
         let filter = SearchFilter::default();
 
         let results = search_captions(&mut conn, &expression("台 AND 関東に"), &filter, 20, 5)
@@ -639,7 +644,7 @@ mod tests {
 
     #[tokio::test]
     async fn search_captions_supports_or_expression() {
-        let mut conn = seed_search_db().await;
+        let (_data_dir, mut conn) = seed_search_db().await;
         let filter = SearchFilter::default();
 
         let results = search_captions(&mut conn, &expression("関東に OR 明日は"), &filter, 20, 5)
@@ -652,7 +657,7 @@ mod tests {
 
     #[tokio::test]
     async fn search_program_metadata_returns_metadata_match_without_hits() {
-        let mut conn = seed_search_db().await;
+        let (_data_dir, mut conn) = seed_search_db().await;
         let filter = SearchFilter::default();
 
         let results = search_program_metadata(&mut conn, &expression("ニュース"), &filter, 20)
@@ -665,7 +670,7 @@ mod tests {
 
     #[tokio::test]
     async fn search_general_merges_metadata_and_caption_match() {
-        let mut conn = seed_search_db().await;
+        let (_data_dir, mut conn) = seed_search_db().await;
         let filter = SearchFilter::default();
 
         let results = search_general(&mut conn, &expression("台風"), &filter, 20, 5)
@@ -679,7 +684,7 @@ mod tests {
 
     #[tokio::test]
     async fn search_general_returns_empty_hits_for_metadata_only_match() {
-        let mut conn = seed_search_db().await;
+        let (_data_dir, mut conn) = seed_search_db().await;
         let filter = SearchFilter::default();
 
         let results = search_general(&mut conn, &expression("天気"), &filter, 20, 5)
@@ -692,7 +697,7 @@ mod tests {
 
     #[tokio::test]
     async fn search_combined_requires_both_program_and_line_match() {
-        let mut conn = seed_search_db().await;
+        let (_data_dir, mut conn) = seed_search_db().await;
         let filter = SearchFilter::default();
 
         let results = search_combined(
@@ -726,7 +731,7 @@ mod tests {
 
     #[tokio::test]
     async fn search_captions_limits_hits_per_program() {
-        let mut conn = seed_many_caption_hits(10).await;
+        let (_data_dir, mut conn) = seed_many_caption_hits(10).await;
         let filter = SearchFilter::default();
 
         let results = search_captions(&mut conn, &expression("速報"), &filter, 20, 3)
@@ -738,7 +743,7 @@ mod tests {
 
     #[tokio::test]
     async fn search_captions_limits_program_count() {
-        let mut conn = seed_search_db().await;
+        let (_data_dir, mut conn) = seed_search_db().await;
         let filter = SearchFilter::default();
 
         let results = search_captions(&mut conn, &expression("です"), &filter, 1, 5)
@@ -750,7 +755,7 @@ mod tests {
 
     #[tokio::test]
     async fn search_captions_applies_stream_filter() {
-        let mut conn = seed_search_db().await;
+        let (_data_dir, mut conn) = seed_search_db().await;
         let filter = SearchFilter {
             stream: Some("bs"),
             ..Default::default()
@@ -766,7 +771,7 @@ mod tests {
 
     #[tokio::test]
     async fn search_captions_applies_time_filter() {
-        let mut conn = seed_search_db().await;
+        let (_data_dir, mut conn) = seed_search_db().await;
         let filter = SearchFilter {
             from: Some("2026-07-10_20-00-00"),
             ..Default::default()
@@ -781,7 +786,7 @@ mod tests {
 
     #[tokio::test]
     async fn search_captions_applies_genre_filter_at_both_levels() {
-        let mut conn = seed_search_db().await;
+        let (_data_dir, mut conn) = seed_search_db().await;
 
         let level1_filter = SearchFilter {
             genre: Some(GenreFilter {
@@ -811,7 +816,7 @@ mod tests {
 
     #[tokio::test]
     async fn search_captions_finds_one_character_hit_with_stream_filter() {
-        let mut conn = seed_search_db().await;
+        let (_data_dir, mut conn) = seed_search_db().await;
 
         let filter = SearchFilter {
             stream: Some("nhk"),
@@ -826,7 +831,7 @@ mod tests {
 
     #[tokio::test]
     async fn caption_page_is_ordered_and_reports_a_next_page() {
-        let mut conn = seed_search_db().await;
+        let (_data_dir, mut conn) = seed_search_db().await;
 
         let first = get_caption_page(&mut conn, "nhk", "2026-07-10_19-00-00", 1, 1)
             .await
@@ -848,7 +853,7 @@ mod tests {
 
     #[tokio::test]
     async fn caption_page_returns_none_for_an_unknown_program() {
-        let mut conn = seed_search_db().await;
+        let (_data_dir, mut conn) = seed_search_db().await;
 
         let page = get_caption_page(&mut conn, "nhk", "2026-07-10_00-00-00", 1, 100)
             .await
@@ -859,7 +864,7 @@ mod tests {
 
     #[tokio::test]
     async fn caption_page_rejects_non_positive_limits() {
-        let mut conn = seed_search_db().await;
+        let (_data_dir, mut conn) = seed_search_db().await;
 
         for limit in [0, -1] {
             let error = get_caption_page(&mut conn, "nhk", "2026-07-10_19-00-00", 1, limit)

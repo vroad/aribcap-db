@@ -651,12 +651,14 @@ mod tests {
 
     use super::super::db::open_and_migrate;
     use super::super::test_support::{
-        caption_line, eit_line, eit_line_with_genre, temp_dir, write_file,
+        TEST_DIR_PREFIX, caption_line, eit_line, eit_line_with_genre, write_file,
     };
     use super::super::{SearchFilter, parse_search_expression, search_captions};
     use super::*;
+    use crate::test_support::TestDir;
 
     struct IngestFixture {
+        _data_dir: TestDir,
         archive_root: PathBuf,
         db_path: PathBuf,
         conn: SqliteConnection,
@@ -664,11 +666,12 @@ mod tests {
 
     impl IngestFixture {
         async fn new() -> Self {
-            let data_dir = temp_dir();
+            let data_dir = TestDir::new(TEST_DIR_PREFIX);
             let archive_root = data_dir.join("archive");
             let db_path = data_dir.join("search.sqlite3");
             let conn = open_and_migrate(&db_path).await.unwrap();
             Self {
+                _data_dir: data_dir,
                 archive_root,
                 db_path,
                 conn,

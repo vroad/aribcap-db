@@ -17,3 +17,5 @@ pub mod serve;
 pub mod server;
 pub mod stream;
 pub mod tail;
+#[cfg(test)]
+pub(crate) mod test_support;
