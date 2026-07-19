@@ -11,6 +11,7 @@ use std::{
 use anyhow::{Context, Result};
 use chrono::{DateTime, FixedOffset, NaiveDateTime, TimeZone as _, Utc};
 use futures_util::{Stream, StreamExt as _};
+use schemars::JsonSchema;
 use serde::Serialize;
 use serde_json::Value;
 
@@ -64,12 +65,17 @@ pub struct GarbageCollectionDryRun {
     pub cutoff: DateTime<FixedOffset>,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, JsonSchema)]
 pub struct ProgramEntry {
+    /// Archive stream name.
     pub stream: String,
+    /// Archive month in `YYYY-MM` form.
     pub month: String,
+    /// Complete JSONL archive filename.
     pub filename: String,
+    /// HTTP path for retrieving the raw archived program.
     pub path: String,
+    /// File size captured by the background search indexer.
     pub size_bytes: u64,
 }
 

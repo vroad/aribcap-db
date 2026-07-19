@@ -1,103 +1,40 @@
-use std::{collections::HashSet, env, fs, path::Path};
+use std::path::Path;
 
+use crate::{
+    docs_gen::{check_freshness, escape_for_table_cell, rewrite_markers},
+    mcp::AribcapMcp,
+};
 use rmcp::model::Tool;
 use serde_json::{Map, Value};
-use similar::TextDiff;
-
-use crate::mcp::AribcapMcp;
 
 const DOCS_PATH: &str = "docs/mcp.md";
-const GENERATED_TOOL_MARKER_OPEN: &str = "<!-- generated: tool ";
-const GENERATED_TOOL_MARKER_CLOSE: &str = " -->";
-
 #[test]
 fn mcp_docs_are_fresh() {
     let path = Path::new(env!("CARGO_MANIFEST_DIR")).join(DOCS_PATH);
-    let current = fs::read_to_string(&path).unwrap_or_else(|error| {
-        panic!("failed to read {}: {error}", path.display());
-    });
     let tools = AribcapMcp::tools();
-    let expected = rewrite_markers(&current, &tools).unwrap_or_else(|error| {
-        panic!("failed to render {}: {error}", path.display());
-    });
-
-    if current != expected {
-        if env::var_os("UPDATE_MCP_DOCS").is_some_and(|value| value == "1") {
-            fs::write(&path, &expected).unwrap_or_else(|error| {
-                panic!("failed to update {}: {error}", path.display());
-            });
-        } else {
-            panic!(
-                "{} is stale; run UPDATE_MCP_DOCS=1 cargo test mcp_docs\n\n{}",
-                path.display(),
-                document_diff(&current, &expected)
-            );
-        }
-    }
-}
-
-fn rewrite_markers(document: &str, tools: &[Tool]) -> Result<String, String> {
-    let mut remaining_tool_names = tools
-        .iter()
-        .map(|tool| tool.name.as_ref())
-        .collect::<HashSet<_>>();
-    let mut output = String::with_capacity(document.len());
-    let mut cursor = 0;
-
-    while let Some(relative_start) = document[cursor..].find(GENERATED_TOOL_MARKER_OPEN) {
-        // `output.push_str` here copies the hand-written text between the
-        // previous close marker (or the document start, on the first match)
-        // and this open marker, unchanged.
-        let open_marker_start = cursor + relative_start;
-        output.push_str(&document[cursor..open_marker_start]);
-
-        let tool_name_start = open_marker_start + GENERATED_TOOL_MARKER_OPEN.len();
-        let Some(relative_name_end) = document[tool_name_start..].find(GENERATED_TOOL_MARKER_CLOSE)
-        else {
-            let line = document[..open_marker_start].matches('\n').count() + 1;
-            return Err(format!(
-                "opening marker on line {line} has no matching closing marker (`{GENERATED_TOOL_MARKER_CLOSE}`)"
-            ));
-        };
-        let tool_name_end = tool_name_start + relative_name_end;
-
-        let tool_name = document[tool_name_start..tool_name_end].trim();
-        let Some(tool) = tools.iter().find(|tool| tool.name == tool_name) else {
-            return Err(format!("marker references unknown tool `{tool_name}`"));
-        };
-        if !remaining_tool_names.remove(tool_name) {
-            return Err(format!("duplicate marker for tool `{tool_name}`"));
-        }
-
-        let close_marker =
-            format!("{GENERATED_TOOL_MARKER_OPEN}{tool_name} end{GENERATED_TOOL_MARKER_CLOSE}");
-        let body_start = tool_name_end + GENERATED_TOOL_MARKER_CLOSE.len();
-        let Some(end_marker_offset) = document[body_start..].find(&close_marker) else {
-            return Err(format!("end marker missing for tool `{tool_name}`"));
-        };
-        let close_marker_start = body_start + end_marker_offset;
-
-        output.push_str(&render_tool(tool));
-        output.push_str(&close_marker);
-
-        cursor = close_marker_start + close_marker.len();
-    }
-    output.push_str(&document[cursor..]);
-
-    if !remaining_tool_names.is_empty() {
-        let mut missing = remaining_tool_names.into_iter().collect::<Vec<_>>();
-        missing.sort_unstable();
-        return Err(format!("markers missing for tools: {missing:?}"));
-    }
-
-    Ok(output)
+    check_freshness(
+        &path,
+        "UPDATE_MCP_DOCS",
+        "UPDATE_MCP_DOCS=1 cargo test mcp_docs",
+        |document| {
+            rewrite_markers(
+                document,
+                "tool",
+                tools.iter().map(|tool| tool.name.as_ref()),
+                |tool_name| {
+                    let tool = tools
+                        .iter()
+                        .find(|tool| tool.name == tool_name)
+                        .ok_or_else(|| format!("unknown tool `{tool_name}`"))?;
+                    Ok(render_tool(tool))
+                },
+            )
+        },
+    );
 }
 
 fn render_tool(tool: &Tool) -> String {
-    let mut rendered = format!(
-        "<!-- generated: tool {} -->\n### `{}`\n\n",
-        tool.name, tool.name
-    );
+    let mut rendered = format!("### `{}`\n\n", tool.name);
     if let Some(description) = &tool.description {
         rendered.push_str(description);
         rendered.push_str("\n\n");
@@ -198,17 +135,6 @@ fn property_type(property: &Map<String, Value>) -> Result<String, String> {
     }
 }
 
-fn escape_for_table_cell(value: &str) -> String {
-    value.replace('|', "\\|").replace(['\n', '\r'], " ")
-}
-
-fn document_diff(current: &str, expected: &str) -> String {
-    TextDiff::from_lines(current, expected)
-        .unified_diff()
-        .header("docs/mcp.md (checked in)", "docs/mcp.md (generated)")
-        .to_string()
-}
-
 #[test]
 fn render_tool_treats_missing_properties_as_no_arguments() {
     let tool = Tool::new(
@@ -219,8 +145,7 @@ fn render_tool_treats_missing_properties_as_no_arguments() {
 
     assert_eq!(
         render_tool(&tool),
-        "<!-- generated: tool no_arguments -->\n### `no_arguments`\n\n\
-        A tool without arguments\n\nThe tool takes no arguments.\n"
+        "### `no_arguments`\n\nA tool without arguments\n\nThe tool takes no arguments.\n"
     );
 }
 
